@@ -22,10 +22,12 @@ import chisel3.util._
 
 import org.chipsalliance.cde.config._
 import freechips.rocketchip.diplomacy._
-
+import freechips.rocketchip.subsystem._
 
 import freechips.rocketchip.regmapper._
 import freechips.rocketchip.tilelink._
+import java.rmi.AccessException
+import com.fasterxml.jackson.annotation.JsonProperty.Access
 
 class InclusiveCache(
   val cache: CacheParameters,
@@ -139,6 +141,37 @@ class InclusiveCache(
       flushOutValid := true.B
     }
 
+
+    /*
+      Performance Counters that we added
+    */
+    val memBase = p(ExtMem).get.master.base.U
+    val countInstFetch = RegInit(false.B)
+    val AccessCounterReset = RegInit(false.B)
+
+    /* 
+    
+      Some errors were happening here
+
+    */
+    val acc = 0.U
+    val MissCounters = RegInit(VecInit(Seq.fill(node.out.length)(0.U(64.W))))
+    val AccessCounters = RegInit(VecInit(Seq.fill(node.in.length)(0.U(64.W))))
+
+    val TotalAccCount = RegInit(0.U(64.W))
+    val TotalMissCount = RegInit(0.U(64.W))
+    TotalAccCount := AccessCounters.reduceTree(_ + _)
+    TotalMissCount := MissCounters.reduceTree(_ + _)
+
+
+    when (AccessCounterReset)
+    {
+        AccessCounterReset := false.B // make sure we turn off the reset after it is completed
+    }
+
+
+
+
     val flush32 = RegField.w(32, RegWriteFn((ivalid, oready, data) => {
       when (oready) { flushOutReady := true.B }
       when (ivalid) { flushInValid := true.B }
@@ -154,25 +187,44 @@ class InclusiveCache(
     }), RegFieldDesc("Flush64", "Flush the phsyical address equal to the 64-bit written data from the cache"))
 
     // Information about the cache configuration
-    val banksR  = RegField.r(8, node.edges.in.size.U,               RegFieldDesc("Banks",
-      "Number of banks in the cache", reset=Some(node.edges.in.size)))
-    val waysR   = RegField.r(8, cache.ways.U,                       RegFieldDesc("Ways",
-      "Number of ways per bank", reset=Some(cache.ways)))
-    val lgSetsR = RegField.r(8, log2Ceil(cache.sets).U,             RegFieldDesc("lgSets",
-      "Base-2 logarithm of the sets per bank", reset=Some(log2Ceil(cache.sets))))
-    val lgBlockBytesR = RegField.r(8, log2Ceil(cache.blockBytes).U, RegFieldDesc("lgBlockBytes",
-      "Base-2 logarithm of the bytes per cache block", reset=Some(log2Ceil(cache.blockBytes))))
+    val banksR  = Seq(0 -> Seq(RegField.r(8, node.edges.in.size.U,               RegFieldDesc("Banks",
+      "Number of banks in the cache", reset=Some(node.edges.in.size)))))
+    val waysR   = Seq(0x8 -> Seq(RegField.r(8, cache.ways.U,                       RegFieldDesc("Ways",
+      "Number of ways per bank", reset=Some(cache.ways)))))
+    val lgSetsR = Seq(0x10 -> Seq(RegField.r(8, log2Ceil(cache.sets).U,             RegFieldDesc("lgSets",
+      "Base-2 logarithm of the sets per bank", reset=Some(log2Ceil(cache.sets))))))
+    val lgBlockBytesR = Seq(0x18 -> Seq(RegField.r(8, log2Ceil(cache.blockBytes).U, RegFieldDesc("lgBlockBytes",
+      "Base-2 logarithm of the bytes per cache block", reset=Some(log2Ceil(cache.blockBytes))))))
 
-    val regmap = ctlnode.map { c =>
-      c.regmap(
-        0x000 -> RegFieldGroup("Config", Some("Information about the Cache Configuration"), Seq(banksR, waysR, lgSetsR, lgBlockBytesR)),
-        0x200 -> (if (control.get.beatBytes >= 8) Seq(flush64) else Seq()),
-        0x240 -> Seq(flush32)
-      )
+    val LLCAccessCounterReg = Seq(0x20 -> Seq(RegField.r(64, TotalAccCount,  RegFieldDesc("LLCAccessCounterReg", "Total LLC accesses"))))
+    val LLCMissCounterReg = Seq(0x60 -> Seq(RegField.r(64, TotalMissCount, RegFieldDesc("LLCMissCounterReg", "Total LLC misses"))))
+    
+    val LLCAccessCounterReset = Seq(0xa1 -> Seq(RegField.r(AccessCounterReset.getWidth, AccessCounterReset, RegFieldDesc("LLCAccCtrReset", "Reset module for LLC access counters"))))
+    val CountInstFetchReg = Seq(0xa2 -> Seq(RegField.r(countInstFetch.getWidth, countInstFetch, RegFieldDesc("countInstFetch", "Bool count instruction fetches in access counters"))))
+
+    val flush64Reg = Seq(0x200 ->  Seq(flush64))
+    val flush32Reg = Seq(0x240 -> Seq(flush32))
+
+    val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ LLCAccessCounterReg ++ LLCMissCounterReg ++ LLCAccessCounterReset ++ CountInstFetchReg ++ flush64Reg ++ flush32Reg
+
+
+    val regmap = ctlnode.map{ c =>
+      c.regmap(mmreg: _*)
     }
 
+   // val regmap = ctlnode.map { c =>
+   //   c.regmap(
+   //     0x000 -> RegFieldGroup("Config", Some("Information about the Cache Configuration"), Seq(banksR, waysR, lgSetsR, lgBlockBytesR, LLCAccessCounterReg, LLCMissCounterReg,
+   //     LLCAccessCounterReset, CountInstFetchReg)),
+   //     0x200 -> (if (control.get.beatBytes >= 8) Seq(flush64) else Seq()),
+   //     0x240 -> Seq(flush32)
+   //   )
+   // }
+
+
+
     // Create the L2 Banks
-    val mods = (node.in zip node.out) map { case ((in, edgeIn), (out, edgeOut)) =>
+    val mods = (node.in zip node.out).zipWithIndex map { case (((in, edgeIn), (out, edgeOut)), i) =>
       edgeOut.manager.managers.foreach { m =>
         require (m.supportsAcquireB.contains(xfer),
           s"All managers behind the L2 must support acquireB($xfer) " +
@@ -187,6 +239,25 @@ class InclusiveCache(
 
       scheduler.io.in <> in
       out <> scheduler.io.out
+
+
+
+      val aIsAcquire = in.a.bits.opcode === TLMessages.AcquireBlock
+      val aIsInstFetch = in.a.bits.opcode === TLMessages.Get && in.a.bits.address >= memBase
+      val aIsRead = aIsAcquire || (aIsInstFetch && countInstFetch)
+      val aIsWrite = (in.a.bits.opcode === TLMessages.PutFullData || in.a.bits.opcode === TLMessages.PutPartialData) && in.a.bits.address >= memBase
+      val cIsWb = in.c.bits.opcode === TLMessages.ReleaseData || in.c.bits.opcode === TLMessages.ProbeAckData
+      val outaIsAcquire = out.a.bits.opcode === TLMessages.AcquireBlock
+      val outaIsInstFetch = out.a.bits.opcode === TLMessages.Get && in.a.bits.address >= memBase
+
+      
+      val isMiss = outaIsAcquire || (outaIsInstFetch && countInstFetch)
+      val isAccess = cIsWb || aIsWrite || aIsRead || aIsInstFetch
+
+      MissCounters(i) := Mux(AccessCounterReset, 0.U, MissCounters(i) + Mux(isMiss, 1.U, 0.U))
+      AccessCounters(i) := Mux(AccessCounterReset, 0.U, AccessCounters(i) + Mux(isAccess, 1.U, 0.U))
+
+
       scheduler.io.ways := DontCare
       scheduler.io.divs := DontCare
 
