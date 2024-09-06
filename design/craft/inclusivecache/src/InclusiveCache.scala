@@ -28,6 +28,7 @@ import freechips.rocketchip.regmapper._
 import freechips.rocketchip.tilelink._
 import java.rmi.AccessException
 import com.fasterxml.jackson.annotation.JsonProperty.Access
+import midas.targetutils.SynthesizePrintf
 
 class InclusiveCache(
   val cache: CacheParameters,
@@ -146,30 +147,18 @@ class InclusiveCache(
       Performance Counters that we added
     */
     val memBase = p(ExtMem).get.master.base.U
-    val countInstFetch = RegInit(false.B)
+    val countInstFetch = RegInit(true.B)
     val AccessCounterReset = RegInit(false.B)
 
-    /* 
-    
-      Some errors were happening here
-
-    */
-    val acc = 0.U
-    val MissCounters = RegInit(VecInit(Seq.fill(node.out.length)(0.U(64.W))))
+    val MissCounters = RegInit(VecInit(Seq.fill(node.in.length)(0.U(64.W))))
     val AccessCounters = RegInit(VecInit(Seq.fill(node.in.length)(0.U(64.W))))
+
+    assert(node.out.length == node.in.length)
 
     val TotalAccCount = RegInit(0.U(64.W))
     val TotalMissCount = RegInit(0.U(64.W))
     TotalAccCount := AccessCounters.reduceTree(_ + _)
     TotalMissCount := MissCounters.reduceTree(_ + _)
-
-
-    when (AccessCounterReset)
-    {
-        AccessCounterReset := false.B // make sure we turn off the reset after it is completed
-    }
-
-
 
 
     val flush32 = RegField.w(32, RegWriteFn((ivalid, oready, data) => {
@@ -187,6 +176,7 @@ class InclusiveCache(
     }), RegFieldDesc("Flush64", "Flush the phsyical address equal to the 64-bit written data from the cache"))
 
     // Information about the cache configuration
+    // starts at 0x2010000
     val banksR  = Seq(0 -> Seq(RegField.r(8, node.edges.in.size.U,               RegFieldDesc("Banks",
       "Number of banks in the cache", reset=Some(node.edges.in.size)))))
     val waysR   = Seq(0x8 -> Seq(RegField.r(8, cache.ways.U,                       RegFieldDesc("Ways",
@@ -196,16 +186,24 @@ class InclusiveCache(
     val lgBlockBytesR = Seq(0x18 -> Seq(RegField.r(8, log2Ceil(cache.blockBytes).U, RegFieldDesc("lgBlockBytes",
       "Base-2 logarithm of the bytes per cache block", reset=Some(log2Ceil(cache.blockBytes))))))
 
-    val LLCAccessCounterReg = Seq(0x20 -> Seq(RegField.r(64, TotalAccCount,  RegFieldDesc("LLCAccessCounterReg", "Total LLC accesses"))))
-    val LLCMissCounterReg = Seq(0x60 -> Seq(RegField.r(64, TotalMissCount, RegFieldDesc("LLCMissCounterReg", "Total LLC misses"))))
-    
-    val LLCAccessCounterReset = Seq(0xa1 -> Seq(RegField.r(AccessCounterReset.getWidth, AccessCounterReset, RegFieldDesc("LLCAccCtrReset", "Reset module for LLC access counters"))))
-    val CountInstFetchReg = Seq(0xa2 -> Seq(RegField.r(countInstFetch.getWidth, countInstFetch, RegFieldDesc("countInstFetch", "Bool count instruction fetches in access counters"))))
+    val LLCAccessCounterReg0 = Seq(0x20 -> Seq(RegField.r(64, AccessCounters(0),  RegFieldDesc("LLCAccessCounterReg0", "Total LLC accesses"))))
+    val LLCAccessCounterReg1 = Seq(0x30 -> Seq(RegField.r(64, AccessCounters(1),  RegFieldDesc("LLCAccessCounterReg1", "Total LLC accesses"))))
+    val LLCAccessCounterReg2 = Seq(0x40 -> Seq(RegField.r(64, AccessCounters(2),  RegFieldDesc("LLCAccessCounterReg2", "Total LLC accesses"))))
+    val LLCAccessCounterReg3 = Seq(0x50 -> Seq(RegField.r(64, AccessCounters(3),  RegFieldDesc("LLCAccessCounterReg3", "Total LLC accesses"))))
+    val LLCMissCounterReg0 = Seq(0x60 -> Seq(RegField.r(64, MissCounters(0), RegFieldDesc("LLCMissCounterReg0", "Total LLC misses"))))
+    val LLCMissCounterReg1 = Seq(0x70 -> Seq(RegField.r(64, MissCounters(1), RegFieldDesc("LLCMissCounterReg1", "Total LLC misses"))))
+    val LLCMissCounterReg2 = Seq(0x80 -> Seq(RegField.r(64, MissCounters(2), RegFieldDesc("LLCMissCounterReg2", "Total LLC misses"))))
+    val LLCMissCounterReg3 = Seq(0x90 -> Seq(RegField.r(64, MissCounters(3), RegFieldDesc("LLCMissCounterReg3", "Total LLC misses"))))
+
+    val LLCAccessCounterReset = Seq(0xa0 -> Seq(RegField(AccessCounterReset.getWidth, AccessCounterReset, RegFieldDesc("LLCAccCtrReset", "Reset module for LLC access counters"))))
+    val CountInstFetchReg = Seq(0xa8 -> Seq(RegField(countInstFetch.getWidth, countInstFetch, RegFieldDesc("countInstFetch", "Bool count instruction fetches in access counters"))))
 
     val flush64Reg = Seq(0x200 ->  Seq(flush64))
     val flush32Reg = Seq(0x240 -> Seq(flush32))
 
-    val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ LLCAccessCounterReg ++ LLCMissCounterReg ++ LLCAccessCounterReset ++ CountInstFetchReg ++ flush64Reg ++ flush32Reg
+    val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ LLCAccessCounterReg0 ++ LLCAccessCounterReg1 ++ LLCAccessCounterReg2 ++ LLCAccessCounterReg3 ++ 
+    LLCMissCounterReg0 ++ LLCMissCounterReg1 ++ LLCMissCounterReg2 ++ LLCMissCounterReg3 ++ 
+    LLCAccessCounterReset ++ CountInstFetchReg ++ flush64Reg ++ flush32Reg
 
 
     val regmap = ctlnode.map{ c =>
@@ -237,9 +235,10 @@ class InclusiveCache(
       val params = InclusiveCacheParameters(cache, micro, control.isDefined, edgeIn, edgeOut)
       val scheduler = Module(new InclusiveCacheBankScheduler(params)).suggestName("inclusive_cache_bank_sched")
 
+
+      in.a.bits.domainId := i.U // set the domainID based on the input edge index
       scheduler.io.in <> in
       out <> scheduler.io.out
-
 
 
       val aIsAcquire = in.a.bits.opcode === TLMessages.AcquireBlock
@@ -247,14 +246,15 @@ class InclusiveCache(
       val aIsRead = aIsAcquire || (aIsInstFetch && countInstFetch)
       val aIsWrite = (in.a.bits.opcode === TLMessages.PutFullData || in.a.bits.opcode === TLMessages.PutPartialData) && in.a.bits.address >= memBase
       val cIsWb = in.c.bits.opcode === TLMessages.ReleaseData || in.c.bits.opcode === TLMessages.ProbeAckData
-      val outaIsAcquire = out.a.bits.opcode === TLMessages.AcquireBlock
-      val outaIsInstFetch = out.a.bits.opcode === TLMessages.Get && in.a.bits.address >= memBase
+      val outaIsAcquire = scheduler.io.out.a.bits.opcode === TLMessages.AcquireBlock
+      val outaIsInstFetch = scheduler.io.out.a.bits.opcode === TLMessages.Get && scheduler.io.out.a.bits.address >= memBase
 
       
-      val isMiss = outaIsAcquire || (outaIsInstFetch && countInstFetch)
-      val isAccess = cIsWb || aIsWrite || aIsRead || aIsInstFetch
+      val isMiss = (outaIsAcquire || (outaIsInstFetch && countInstFetch)) && scheduler.io.out.a.fire
+      val isAccess = (cIsWb || aIsWrite || aIsRead || aIsInstFetch) && in.a.fire
+      
 
-      MissCounters(i) := Mux(AccessCounterReset, 0.U, MissCounters(i) + Mux(isMiss, 1.U, 0.U))
+      MissCounters(scheduler.io.out.a.bits.domainId) := Mux(AccessCounterReset, 0.U, MissCounters(scheduler.io.out.a.bits.domainId) + Mux(isMiss, 1.U, 0.U))
       AccessCounters(i) := Mux(AccessCounterReset, 0.U, AccessCounters(i) + Mux(isAccess, 1.U, 0.U))
 
 
