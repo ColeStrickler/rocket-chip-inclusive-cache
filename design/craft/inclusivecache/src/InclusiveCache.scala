@@ -186,24 +186,25 @@ class InclusiveCache(
     val lgBlockBytesR = Seq(0x18 -> Seq(RegField.r(8, log2Ceil(cache.blockBytes).U, RegFieldDesc("lgBlockBytes",
       "Base-2 logarithm of the bytes per cache block", reset=Some(log2Ceil(cache.blockBytes))))))
 
-    val LLCAccessCounterReg0 = Seq(0x20 -> Seq(RegField.r(64, AccessCounters(0),  RegFieldDesc("LLCAccessCounterReg0", "Total LLC accesses"))))
-    val LLCAccessCounterReg1 = Seq(0x30 -> Seq(RegField.r(64, AccessCounters(1),  RegFieldDesc("LLCAccessCounterReg1", "Total LLC accesses"))))
-    val LLCAccessCounterReg2 = Seq(0x40 -> Seq(RegField.r(64, AccessCounters(2),  RegFieldDesc("LLCAccessCounterReg2", "Total LLC accesses"))))
-    val LLCAccessCounterReg3 = Seq(0x50 -> Seq(RegField.r(64, AccessCounters(3),  RegFieldDesc("LLCAccessCounterReg3", "Total LLC accesses"))))
-    val LLCMissCounterReg0 = Seq(0x60 -> Seq(RegField.r(64, MissCounters(0), RegFieldDesc("LLCMissCounterReg0", "Total LLC misses"))))
-    val LLCMissCounterReg1 = Seq(0x70 -> Seq(RegField.r(64, MissCounters(1), RegFieldDesc("LLCMissCounterReg1", "Total LLC misses"))))
-    val LLCMissCounterReg2 = Seq(0x80 -> Seq(RegField.r(64, MissCounters(2), RegFieldDesc("LLCMissCounterReg2", "Total LLC misses"))))
-    val LLCMissCounterReg3 = Seq(0x90 -> Seq(RegField.r(64, MissCounters(3), RegFieldDesc("LLCMissCounterReg3", "Total LLC misses"))))
 
-    val LLCAccessCounterReset = Seq(0xa0 -> Seq(RegField(AccessCounterReset.getWidth, AccessCounterReset, RegFieldDesc("LLCAccCtrReset", "Reset module for LLC access counters"))))
-    val CountInstFetchReg = Seq(0xa8 -> Seq(RegField(countInstFetch.getWidth, countInstFetch, RegFieldDesc("countInstFetch", "Bool count instruction fetches in access counters"))))
+    
+    val LLCAccessCounters = AccessCounters.zipWithIndex.map{ case (reg, i) => 
+      (0x20 + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCAccessCounterReg${i}", s"Total LLC accesses for domainId=${i}")))
+    }
+    val MissCounterOffset = (0x20 + node.in.length * AccessCounters(0).getWidth)
+    val LLCMissCounters = MissCounters.zipWithIndex.map{ case (reg, i) =>
+      (MissCounterOffset + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCMissCounterReg${i}", s"Total LLC misses for domainId=${i}")))
+    }
+    val AccessCounterResetOffset = (MissCounterOffset + node.in.length * MissCounters(0).getWidth)
+
+    val LLCAccessCounterReset = Seq((AccessCounterResetOffset) -> Seq(RegField(AccessCounterReset.getWidth, AccessCounterReset, RegFieldDesc("LLCAccCtrReset", "Reset module for LLC access counters"))))
+    val CountInstFetchReg = Seq((AccessCounterResetOffset + 0x8) -> Seq(RegField(countInstFetch.getWidth, countInstFetch, RegFieldDesc("countInstFetch", "Bool count instruction fetches in access counters"))))
 
     val flush64Reg = Seq(0x200 ->  Seq(flush64))
     val flush32Reg = Seq(0x240 -> Seq(flush32))
 
-    val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ LLCAccessCounterReg0 ++ LLCAccessCounterReg1 ++ LLCAccessCounterReg2 ++ LLCAccessCounterReg3 ++ 
-    LLCMissCounterReg0 ++ LLCMissCounterReg1 ++ LLCMissCounterReg2 ++ LLCMissCounterReg3 ++ 
-    LLCAccessCounterReset ++ CountInstFetchReg ++ flush64Reg ++ flush32Reg
+    val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ LLCAccessCounters ++ LLCMissCounters ++ LLCAccessCounterReset ++ CountInstFetchReg ++ flush64Reg ++ flush32Reg
+    
 
 
     val regmap = ctlnode.map{ c =>
@@ -219,10 +220,11 @@ class InclusiveCache(
    //   )
    // }
 
-
+    
 
     // Create the L2 Banks
     val mods = (node.in zip node.out).zipWithIndex map { case (((in, edgeIn), (out, edgeOut)), i) =>
+      
       edgeOut.manager.managers.foreach { m =>
         require (m.supportsAcquireB.contains(xfer),
           s"All managers behind the L2 must support acquireB($xfer) " +
@@ -234,12 +236,20 @@ class InclusiveCache(
 
       val params = InclusiveCacheParameters(cache, micro, control.isDefined, edgeIn, edgeOut)
       val scheduler = Module(new InclusiveCacheBankScheduler(params)).suggestName("inclusive_cache_bank_sched")
+      
+      /* 
+        We cannot do this here because the system bus sits between the L2 and the L1
 
-
-      in.a.bits.domainId := i.U // set the domainID based on the input edge index
+        These in edges are not directly connected to the core Tiles
+      */
+      //in.a.bits.domainId := i.U // set the domainID based on the input edge index
       scheduler.io.in <> in
       out <> scheduler.io.out
+      
 
+      when ( in.a.fire ) {
+        SynthesizePrintf("in.a.fire source %d, domainID %d, Count %d\n", in.a.bits.source, in.a.bits.domainId, AccessCounters(in.a.bits.domainId))
+      }
 
       val aIsAcquire = in.a.bits.opcode === TLMessages.AcquireBlock
       val aIsInstFetch = in.a.bits.opcode === TLMessages.Get && in.a.bits.address >= memBase
@@ -253,10 +263,12 @@ class InclusiveCache(
       val isMiss = (outaIsAcquire || (outaIsInstFetch && countInstFetch)) && scheduler.io.out.a.fire
       val isAccess = (cIsWb || aIsWrite || aIsRead || aIsInstFetch) && in.a.fire
       
-
       MissCounters(scheduler.io.out.a.bits.domainId) := Mux(AccessCounterReset, 0.U, MissCounters(scheduler.io.out.a.bits.domainId) + Mux(isMiss, 1.U, 0.U))
-      AccessCounters(i) := Mux(AccessCounterReset, 0.U, AccessCounters(i) + Mux(isAccess, 1.U, 0.U))
+      AccessCounters(in.a.bits.domainId) := Mux(AccessCounterReset, 0.U, AccessCounters(in.a.bits.domainId) + Mux(isAccess, 1.U, 0.U))
 
+      when ( scheduler.io.out.a.fire ) {
+        SynthesizePrintf("scheduler.io.out.a.fire source %d, domainID %d, Count %d\n", scheduler.io.out.a.bits.source, scheduler.io.out.a.bits.domainId, MissCounters(scheduler.io.out.a.bits.domainId))
+      }
 
       scheduler.io.ways := DontCare
       scheduler.io.divs := DontCare
