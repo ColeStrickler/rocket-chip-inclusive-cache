@@ -189,9 +189,9 @@ class InclusiveCache(
 
     
     val LLCAccessCounters = AccessCounters.zipWithIndex.map{ case (reg, i) => 
-      (0x20 + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCAccessCounterReg${i}", s"Total LLC accesses for domainId=${i}")))
+      (0x20 + i * 0x8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCAccessCounterReg${i}", s"Total LLC accesses for domainId=${i}")))
     }
-    val MissCounterOffset = (0x20 + node.in.length * AccessCounters(0).getWidth)
+    val MissCounterOffset = (0x20 + node.in.length * 0x8)
     val LLCMissCounters = MissCounters.zipWithIndex.map{ case (reg, i) =>
       (MissCounterOffset + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCMissCounterReg${i}", s"Total LLC misses for domainId=${i}")))
     }
