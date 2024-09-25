@@ -20,6 +20,8 @@ package sifive.blocks.inclusivecache
 import chisel3._
 import chisel3.util._
 import freechips.rocketchip.tilelink._
+import midas.targetutils.SynthesizePrintf
+import scala.annotation.meta.param
 
 class SourceARequest(params: InclusiveCacheParameters) extends InclusiveCacheBundle(params)
 {
@@ -51,6 +53,7 @@ class SourceA(params: InclusiveCacheParameters) extends Module
   a.bits.opcode  := Mux(io.req.bits.block, TLMessages.AcquireBlock, TLMessages.AcquirePerm)
   a.bits.param   := io.req.bits.param
   a.bits.size    := params.offsetBits.U
+
   a.bits.source  := io.req.bits.source
   a.bits.address := params.expandAddress(io.req.bits.tag, io.req.bits.set, 0.U)
   a.bits.mask    := ~0.U(params.outer.manager.beatBytes.W)

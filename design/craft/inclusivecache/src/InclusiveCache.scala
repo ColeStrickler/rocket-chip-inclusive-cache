@@ -149,16 +149,40 @@ class InclusiveCache(
     val memBase = p(ExtMem).get.master.base.U
     val countInstFetch = RegInit(true.B)
     val AccessCounterReset = RegInit(false.B)
-
-    val MissCounters = RegInit(VecInit(Seq.fill(node.in.length)(0.U(64.W))))
-    val AccessCounters = RegInit(VecInit(Seq.fill(node.in.length)(0.U(64.W))))
-
+    val PerBankMissCounters =  Seq.fill(cache.numCPUs)(RegInit(VecInit(Seq.fill(node.in.length)(0.U(64.W)))))
+    val PerBankAccessCounters = Seq.fill(cache.numCPUs)(RegInit(VecInit(Seq.fill(node.in.length)(0.U(64.W)))))
     assert(node.out.length == node.in.length)
 
-    val TotalAccCount = RegInit(0.U(64.W))
-    val TotalMissCount = RegInit(0.U(64.W))
-    TotalAccCount := AccessCounters.reduceTree(_ + _)
-    TotalMissCount := MissCounters.reduceTree(_ + _)
+    // Per-CPU counters
+    val MissCounters = Seq.fill(cache.numCPUs)(RegInit(0.U(64.W)))
+    val AccessCounters = Seq.fill(cache.numCPUs)(RegInit(0.U(64.W)))
+
+    /*
+      If we do not have this here, the counters only get zeroed out when a request traverses the bank/cpu combo
+    */
+    when (AccessCounterReset)
+    {
+        for (i <- 0 until cache.numCPUs)
+        {
+          for (j <- 0 until node.in.length)
+          {
+            PerBankAccessCounters(i)(j) := 0.U
+            PerBankAccessCounters(i)(j) := 0.U
+          }
+          MissCounters(i) := 0.U
+          AccessCounters(i) := 0.U
+        }
+    }
+    .otherwise 
+    {
+        for (j <- 0 until cache.numCPUs)
+        {
+          MissCounters(j) := MissCounters(j) + PerBankMissCounters(j).reduceTree(_ + _) 
+          AccessCounters(j) := AccessCounters(j) + PerBankAccessCounters(j).reduceTree(_ + _) 
+        }    
+    }
+
+
 
 
     val flush32 = RegField.w(32, RegWriteFn((ivalid, oready, data) => {
@@ -189,13 +213,13 @@ class InclusiveCache(
 
     
     val LLCAccessCounters = AccessCounters.zipWithIndex.map{ case (reg, i) => 
-      (0x20 + i * 0x8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCAccessCounterReg${i}", s"Total LLC accesses for domainId=${i}")))
+      (0x20 + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCAccessCounterReg${i}", s"Total LLC accesses for domainId=${i}")))
     }
-    val MissCounterOffset = (0x20 + node.in.length * 0x8)
+    val MissCounterOffset = (0x100)
     val LLCMissCounters = MissCounters.zipWithIndex.map{ case (reg, i) =>
       (MissCounterOffset + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCMissCounterReg${i}", s"Total LLC misses for domainId=${i}")))
     }
-    val AccessCounterResetOffset = (MissCounterOffset + node.in.length * MissCounters(0).getWidth)
+    val AccessCounterResetOffset = (0x190)
 
     val LLCAccessCounterReset = Seq((AccessCounterResetOffset) -> Seq(RegField(AccessCounterReset.getWidth, AccessCounterReset, RegFieldDesc("LLCAccCtrReset", "Reset module for LLC access counters"))))
     val CountInstFetchReg = Seq((AccessCounterResetOffset + 0x8) -> Seq(RegField(countInstFetch.getWidth, countInstFetch, RegFieldDesc("countInstFetch", "Bool count instruction fetches in access counters"))))
@@ -247,8 +271,11 @@ class InclusiveCache(
       out <> scheduler.io.out
       
 
+      /* Performance Counters */
+      val outDomainID = scheduler.io.out.a.bits.domainId.litValue.toInt
+      val inDomainID = in.a.bits.domainId.litValue.toInt
       when ( in.a.fire ) {
-        SynthesizePrintf("in.a.fire source %d, domainID %d, Count %d\n", in.a.bits.source, in.a.bits.domainId, AccessCounters(in.a.bits.domainId))
+        SynthesizePrintf("in.a.fire source %d, domainID %d, Count %d, Bank %d\n", in.a.bits.source, in.a.bits.domainId, AccessCounters(inDomainID)(i), i)
       }
 
       val aIsAcquire = in.a.bits.opcode === TLMessages.AcquireBlock
@@ -260,15 +287,20 @@ class InclusiveCache(
       val outaIsInstFetch = scheduler.io.out.a.bits.opcode === TLMessages.Get && scheduler.io.out.a.bits.address >= memBase
 
       
-      val isMiss = (outaIsAcquire || (outaIsInstFetch && countInstFetch)) && scheduler.io.out.a.fire
-      val isAccess = (cIsWb || aIsWrite || aIsRead || aIsInstFetch) && in.a.fire
-      
-      MissCounters(scheduler.io.out.a.bits.domainId) := Mux(AccessCounterReset, 0.U, MissCounters(scheduler.io.out.a.bits.domainId) + Mux(isMiss, 1.U, 0.U))
-      AccessCounters(in.a.bits.domainId) := Mux(AccessCounterReset, 0.U, AccessCounters(in.a.bits.domainId) + Mux(isAccess, 1.U, 0.U))
+      val isMiss = (outaIsAcquire || (outaIsInstFetch && countInstFetch)) && out.a.fire
+      val isAccess = (cIsWb || aIsWrite || aIsRead || (aIsInstFetch && countInstFetch)) && in.a.fire
+
+      when (!AccessCounterReset)
+      {
+        MissCounters(outDomainID)(i)  := MissCounters(outDomainID)(i) + Mux(isMiss, 1.U, 0.U) 
+        AccessCounters(inDomainID)(i) := AccessCounters(inDomainID)(i) + Mux(isAccess, 1.U, 0.U)
+      }
 
       when ( scheduler.io.out.a.fire ) {
-        SynthesizePrintf("scheduler.io.out.a.fire source %d, domainID %d, Count %d\n", scheduler.io.out.a.bits.source, scheduler.io.out.a.bits.domainId, MissCounters(scheduler.io.out.a.bits.domainId))
+        SynthesizePrintf("scheduler.io.out.a.fire source %d, domainID %d, Count %d, Bank %d\n", scheduler.io.out.a.bits.source, scheduler.io.out.a.bits.domainId, MissCounters(outDomainID)(i), i)
       }
+       /* Performance Counters */
+
 
       scheduler.io.ways := DontCare
       scheduler.io.divs := DontCare

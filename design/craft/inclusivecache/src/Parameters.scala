@@ -33,14 +33,14 @@ case class CacheParameters(
   sets:        Int,
   blockBytes:  Int,
   beatBytes:   Int, // inner
-  hintsSkipProbe: Boolean)
+  hintsSkipProbe: Boolean,
+  numCPUs:       Int)
 {
   require (ways > 0)
   require (sets > 0)
   require (blockBytes > 0 && isPow2(blockBytes))
   require (beatBytes > 0 && isPow2(beatBytes))
   require (blockBytes >= beatBytes)
-
   val blocks = ways * sets
   val sizeBytes = blocks * blockBytes
   val blockBeats = blockBytes/beatBytes
