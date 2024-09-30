@@ -149,8 +149,8 @@ class InclusiveCache(
     val memBase = p(ExtMem).get.master.base.U
     val countInstFetch = RegInit(true.B)
     val AccessCounterReset = RegInit(false.B)
-    val PerBankMissCounters =  Seq.fill(cache.numCPUs)(RegInit(VecInit(Seq.fill(node.in.length)(0.U(64.W)))))
-    val PerBankAccessCounters = Seq.fill(cache.numCPUs)(RegInit(VecInit(Seq.fill(node.in.length)(0.U(64.W)))))
+    val PerBankMissCounters =  Seq.fill(node.in.length)(RegInit(VecInit(Seq.fill(cache.numCPUs)(0.U(64.W)))))
+    val PerBankAccessCounters = Seq.fill(node.in.length)(RegInit(VecInit(Seq.fill(cache.numCPUs)(0.U(64.W)))))
     assert(node.out.length == node.in.length)
 
     // Per-CPU counters
@@ -162,23 +162,38 @@ class InclusiveCache(
     */
     when (AccessCounterReset)
     {
-        for (i <- 0 until cache.numCPUs)
+        for (i <- 0 until node.in.length)
         {
-          for (j <- 0 until node.in.length)
+          for (j <- 0 until cache.numCPUs)
           {
             PerBankAccessCounters(i)(j) := 0.U
-            PerBankAccessCounters(i)(j) := 0.U
+            PerBankMissCounters(i)(j) := 0.U
           }
-          MissCounters(i) := 0.U
-          AccessCounters(i) := 0.U
         }
+
+        for (j <- 0 until cache.numCPUs)
+        {
+            MissCounters(j) := 0.U
+            AccessCounters(j) := 0.U
+        }
+
     }
     .otherwise 
     {
         for (j <- 0 until cache.numCPUs)
         {
-          MissCounters(j) := MissCounters(j) + PerBankMissCounters(j).reduceTree(_ + _) 
-          AccessCounters(j) := AccessCounters(j) + PerBankAccessCounters(j).reduceTree(_ + _) 
+          val tmpSumMiss = VecInit(Seq.fill(node.in.length)(0.U(64.W)))
+          val tmpSumAccess = VecInit(Seq.fill(node.in.length)(0.U(64.W)))
+          tmpSumMiss(0) := PerBankMissCounters(0)(j)
+          tmpSumAccess(0) := PerBankAccessCounters(0)(j)
+          for (i <- 1 until node.in.length)
+          {
+            tmpSumMiss(i) := PerBankMissCounters(i)(j) + tmpSumMiss(i-1)
+            tmpSumAccess(i) := PerBankAccessCounters(i)(j) + tmpSumAccess(i-1)
+          }
+
+          MissCounters(j) := tmpSumMiss(node.in.length - 1)
+          AccessCounters(j) := tmpSumAccess(node.in.length - 1)
         }    
     }
 
@@ -272,10 +287,10 @@ class InclusiveCache(
       
 
       /* Performance Counters */
-      val outDomainID = scheduler.io.out.a.bits.domainId.litValue.toInt
-      val inDomainID = in.a.bits.domainId.litValue.toInt
+      val outDomainID = scheduler.io.out.a.bits.domainId
+      val inDomainID = in.a.bits.domainId
       when ( in.a.fire ) {
-        SynthesizePrintf("in.a.fire source %d, domainID %d, Count %d, Bank %d\n", in.a.bits.source, in.a.bits.domainId, AccessCounters(inDomainID)(i), i)
+        SynthesizePrintf("in.a.fire source %d, domainID %d, Count %d, Bank %d\n", in.a.bits.source, in.a.bits.domainId, PerBankAccessCounters(i)(inDomainID), i.U)
       }
 
       val aIsAcquire = in.a.bits.opcode === TLMessages.AcquireBlock
@@ -288,16 +303,23 @@ class InclusiveCache(
 
       
       val isMiss = (outaIsAcquire || (outaIsInstFetch && countInstFetch)) && out.a.fire
-      val isAccess = (cIsWb || aIsWrite || aIsRead || (aIsInstFetch && countInstFetch)) && in.a.fire
+      val isAccess = ((aIsWrite || aIsRead || (aIsInstFetch && countInstFetch)) && in.a.fire) || (cIsWb && in.c.fire) 
 
       when (!AccessCounterReset)
       {
-        MissCounters(outDomainID)(i)  := MissCounters(outDomainID)(i) + Mux(isMiss, 1.U, 0.U) 
-        AccessCounters(inDomainID)(i) := AccessCounters(inDomainID)(i) + Mux(isAccess, 1.U, 0.U)
+        when (isMiss)
+        {
+          PerBankMissCounters(i)(outDomainID)  := PerBankMissCounters(i)(outDomainID) + 1.U
+        }
+        when (isAccess)
+        {
+          PerBankAccessCounters(i)(inDomainID) := PerBankAccessCounters(i)(inDomainID) + 1.U
+        }
       }
 
+
       when ( scheduler.io.out.a.fire ) {
-        SynthesizePrintf("scheduler.io.out.a.fire source %d, domainID %d, Count %d, Bank %d\n", scheduler.io.out.a.bits.source, scheduler.io.out.a.bits.domainId, MissCounters(outDomainID)(i), i)
+        SynthesizePrintf("scheduler.io.out.a.fire source %d, domainID %d, Count %d, Bank %d\n", scheduler.io.out.a.bits.source, scheduler.io.out.a.bits.domainId, PerBankMissCounters(i)(outDomainID), i.U)
       }
        /* Performance Counters */
 
