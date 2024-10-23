@@ -29,6 +29,30 @@ import freechips.rocketchip.tilelink._
 import java.rmi.AccessException
 import com.fasterxml.jackson.annotation.JsonProperty.Access
 import midas.targetutils.SynthesizePrintf
+import freechips.rocketchip.util.Annotated.interrupts
+import freechips.rocketchip.devices.tilelink.CLINTConsts.ints
+
+
+//class BlockDeviceFrontend(c: BlockDeviceFrontendParams)(implicit p: Parameters)
+//  extends TLRegisterRouter(
+//    c.address, "blkdev-controller", Seq("ucbbar,blkdev"),
+//    interrupts = 1, beatBytes = c.beatBytes, concurrency = 1)(
+//      new TLRegBundle(c, _)    with BlockDeviceFrontendBundle)(
+//      new TLRegModule(c, _, _) with BlockDeviceFrontendModule)
+
+
+
+
+class AccessCounterInterruptRouter(ctl: Option[InclusiveCacheControlParameters])(implicit p: Parameters) extends TLRegisterRouter(
+  base = ctl.map(_.address).getOrElse(0),
+   "cache-counters-int", Seq("ku-csl,intdev"),
+  interrupts = 1, 
+  beatBytes = ctl.map(_.beatBytes).getOrElse(8))(
+      new TLRegBundle(ctl, _))(
+      new TLRegModule(ctl, _, _))
+
+
+
 
 class InclusiveCache(
   val cache: CacheParameters,
@@ -48,7 +72,7 @@ class InclusiveCache(
 
     override def describe(resources: ResourceBindings): Description = {
       resourcesOpt = Some(resources)
-
+      
       val Description(name, mapping) = super.describe(resources)
       // Find the outer caches
       val outer = node.edges.out
@@ -74,7 +98,12 @@ class InclusiveCache(
       Description(name, mapping ++ extra ++ nextlevel)
     }
   }
-
+  
+  val intRouter = new AccessCounterInterruptRouter(control)
+  val intNode = intRouter.intnode
+  val (intSrc, _) = intNode.out(0)
+  
+  
   val node: TLAdapterNode = TLAdapterNode(
     clientFn  = { _ => TLClientPortParameters(Seq(TLClientParameters(
       name          = s"L${cache.level} InclusiveCache",
@@ -244,6 +273,7 @@ class InclusiveCache(
 
     val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ LLCAccessCounters ++ LLCMissCounters ++ LLCAccessCounterReset ++ CountInstFetchReg ++ flush64Reg ++ flush32Reg
     
+    intSrc := AccessCounterReset
 
 
     val regmap = ctlnode.map{ c =>

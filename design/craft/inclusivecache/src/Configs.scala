@@ -64,6 +64,7 @@ class WithInclusiveCache(
     implicit val p = context.p
     val sbus = context.tlBusWrapperLocationMap(SBUS)
     val cbus = context.tlBusWrapperLocationMap.lift(CBUS).getOrElse(sbus)
+    val ibus = context.ibus
     val InclusiveCacheParams(
       ways,
       sets,
@@ -104,7 +105,7 @@ class WithInclusiveCache(
         x.nodePath.last.name == "dcache.node"
       if (dcacheMMIO) None else Some(x)
     }
-
+    ibus.fromAsync := l2.intSrc
     val filter = LazyModule(new TLFilter(cfilter = skipMMIO))
     val l2_inner_buffer = bufInnerExterior()
     val l2_outer_buffer = bufOuterExterior()
