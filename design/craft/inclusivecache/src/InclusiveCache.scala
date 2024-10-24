@@ -100,8 +100,18 @@ class InclusiveCache(
   }
   
   val intRouter = new AccessCounterInterruptRouter(control)
+  intRouter.node := ctlnode.get
   val intNode = intRouter.intnode
   val (intSrc, _) = intNode.out(0)
+  /* 
+    This is how it looked like it was done in NVDLA
+
+
+      BlockDevice.scala
+      frontend.node := mmio --> This is a TLRegisterNode ,
+      val intnode = frontend.intnode
+      trackers.foreach { tr => mem := TLWidthWidget(dataBitsPerBeat/8) := tr.node }
+  */
   
   
   val node: TLAdapterNode = TLAdapterNode(
