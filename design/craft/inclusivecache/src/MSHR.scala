@@ -293,6 +293,7 @@ class MSHR(params: InclusiveCacheParameters) extends Module
   io.schedule.bits.c.bits.source  := 0.U
   io.schedule.bits.c.bits.tag     := meta.tag
   io.schedule.bits.c.bits.set     := request.set
+  io.schedule.bits.c.bits.domainId := request.domainId
   io.schedule.bits.c.bits.way     := meta.way
   io.schedule.bits.c.bits.dirty   := meta.dirty
   io.schedule.bits.d.bits.viewAsSupertype(chiselTypeOf(request)) := request

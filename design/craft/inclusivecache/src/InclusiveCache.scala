@@ -29,6 +29,28 @@ import freechips.rocketchip.tilelink._
 import java.rmi.AccessException
 import com.fasterxml.jackson.annotation.JsonProperty.Access
 import midas.targetutils.SynthesizePrintf
+import  freechips.rocketchip.interrupts._
+
+//class AccessCounterInterruptRouter(ctl: Option[InclusiveCacheControlParameters])(implicit p: Parameters) extends TLRegisterRouter(
+//  base = ctl.map(_.address).getOrElse(0),
+//   "cache-counters-int", Seq("ku-csl,intdev"),
+//  interrupts = 1, 
+//  beatBytes = ctl.map(_.beatBytes).getOrElse(8))(
+//      new TLRegBundle(ctl, _))(
+//      new TLRegModule(ctl, _, _))
+//class ACRouterModule(outer: ACRouterImp, ctlnode : TLRegisterNode) extends LazyModuleImp(outer) with HasTLControlRegMap with HasInterruptSources
+//{ 
+//  val router = LazyModule(new AccessCounterInterruptRouter(outer.ctl))
+//  val intRouter =  router
+//  intRouter.node := ctlnode
+//  val intNode = intRouter.intnode
+//  val (intSrc, _) = intNode.out(0)
+//}
+//class ACRouterImp(ctrl: Option[InclusiveCacheControlParameters], ctlnode : TLRegisterNode)(implicit p: Parameters) extends LazyModule {
+//  val ctl = ctrl 
+//  lazy val module = new ACRouterModule(this, ctlnode)
+//}
+
 
 class InclusiveCache(
   val cache: CacheParameters,
@@ -106,10 +128,12 @@ class InclusiveCache(
     device      = device,
     concurrency = 1, // Only one flush at a time (else need to track who answers)
     beatBytes   = c.beatBytes)}
-
+  val intSrc = IntSourceNode(IntSourcePortSimple(num = 1))
   lazy val module = new Impl
   class Impl extends LazyModuleImp(this) {
 
+
+    
     // If you have a control port, you must have at least one cache port
     require (!ctlnode.isDefined || !node.edges.in.isEmpty)
 
@@ -198,7 +222,9 @@ class InclusiveCache(
     }
 
 
-
+    
+    val (intOut, _) = intSrc.out(0)
+    intOut(0) := AccessCounterReset
 
     val flush32 = RegField.w(32, RegWriteFn((ivalid, oready, data) => {
       when (oready) { flushOutReady := true.B }

@@ -30,6 +30,7 @@ class SourceCRequest(params: InclusiveCacheParameters) extends InclusiveCacheBun
   val set    = UInt(params.setBits.W)
   val way    = UInt(params.wayBits.W)
   val dirty  = Bool()
+  val domainId = UInt(2.W)
 }
 
 class SourceC(params: InclusiveCacheParameters) extends Module
@@ -107,6 +108,7 @@ class SourceC(params: InclusiveCacheParameters) extends Module
   c.bits.opcode  := s3_req.opcode
   c.bits.param   := s3_req.param
   c.bits.size    := params.offsetBits.U
+  c.bits.domainId := s3_req.domainId
   c.bits.source  := s3_req.source
   c.bits.address := params.expandAddress(s3_req.tag, s3_req.set, 0.U)
   c.bits.data    := io.bs_dat.data
