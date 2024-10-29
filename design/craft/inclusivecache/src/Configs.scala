@@ -104,7 +104,7 @@ class WithInclusiveCache(
         x.nodePath.last.name == "dcache.node"
       if (dcacheMMIO) None else Some(x)
     }
-
+    
     val filter = LazyModule(new TLFilter(cfilter = skipMMIO))
     val l2_inner_buffer = bufInnerExterior()
     val l2_outer_buffer = bufOuterExterior()
