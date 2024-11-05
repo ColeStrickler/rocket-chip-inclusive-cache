@@ -32,26 +32,164 @@ import midas.targetutils.SynthesizePrintf
 import  freechips.rocketchip.interrupts._
 import freechips.rocketchip.util.Annotated.interrupts
 
-//class AccessCounterInterruptRouter(ctl: Option[InclusiveCacheControlParameters])(implicit p: Parameters) extends TLRegisterRouter(
-//  base = ctl.map(_.address).getOrElse(0),
-//   "cache-counters-int", Seq("ku-csl,intdev"),
-//  interrupts = 1, 
-//  beatBytes = ctl.map(_.beatBytes).getOrElse(8))(
-//      new TLRegBundle(ctl, _))(
-//      new TLRegModule(ctl, _, _))
-//class ACRouterModule(outer: ACRouterImp, ctlnode : TLRegisterNode) extends LazyModuleImp(outer) with HasTLControlRegMap with HasInterruptSources
-//{ 
-//  val router = LazyModule(new AccessCounterInterruptRouter(outer.ctl))
-//  val intRouter =  router
-//  intRouter.node := ctlnode
-//  val intNode = intRouter.intnode
-//  val (intSrc, _) = intNode.out(0)
-//}
-//class ACRouterImp(ctrl: Option[InclusiveCacheControlParameters], ctlnode : TLRegisterNode)(implicit p: Parameters) extends LazyModule {
-//  val ctl = ctrl 
-//  lazy val module = new ACRouterModule(this, ctlnode)
-//}
+class CacheAccessCounterIO(num_banks: Int, num_cpus : Int, TLBundleParam : TLBundleParameters) extends Bundle {
+    val TLIn = Input(Vec(num_banks, TLBundle(TLBundleParam)))
+    val TLOut = Input(Vec(num_banks, TLBundle(TLBundleParam)))
+    val interrupt = Output(Vec(num_cpus, Bool()))
+}
 
+
+class CacheAccessCounter(accCounterParams: CacheAccessCounterParams) (implicit p: Parameters)  extends LazyModule
+{
+  lazy val module = new CacheAccessCounterModule(this, accCounterParams)
+}
+
+
+case class CacheAccessCounterParams
+(
+    num_cpus : Int,
+    tlBundleParam: TLBundleParameters
+)
+
+
+class CacheAccessCounterModule(
+  val outer : CacheAccessCounter,
+  val accCounterParams : CacheAccessCounterParams,
+  ) extends LazyModuleImp(outer)
+{
+    val nBanks = p(BankedL2Key).nBanks
+    val io = IO(new CacheAccessCounterIO(nBanks, accCounterParams.num_cpus, accCounterParams.tlBundleParam))
+
+
+    
+
+
+    /*
+        Settings Registers
+    */
+    val memBase = p(ExtMem).get.master.base.U
+    val countInstFetch = RegInit(true.B)
+    val AccessCounterReset = RegInit(false.B)
+    val EnableInterrupt = Seq.fill(accCounterParams.num_cpus)(RegInit(false.B))
+    val wPeriod = 25 // for max 33.5ms period, F = 1GHz
+    val w = wPeriod - 3 // it can count up to a transaction per 8 cycles when window size is set to max
+    val periodLen = Reg(UInt(wPeriod.W))
+
+
+    /*
+        Per-CacheBank counters
+    */
+    val PerBankMissCounters =  Seq.fill(nBanks)(RegInit(VecInit(Seq.fill(accCounterParams.num_cpus)(0.U(64.W)))))
+    val PerBankAccessCounters = Seq.fill(nBanks)(RegInit(VecInit(Seq.fill(accCounterParams.num_cpus)(0.U(64.W)))))
+    // Per-CPU counters
+    val MissCounters = Seq.fill(accCounterParams.num_cpus)(RegInit(0.U(64.W)))
+    val AccessCounters = Seq.fill(accCounterParams.num_cpus)(RegInit(0.U(64.W)))
+    // Per-CPU Regulation Budgets
+    val CoreBudgets = Seq.fill(accCounterParams.num_cpus)(RegInit(0.U(64.W)))
+    
+    // Regulation
+    val periodCntrReset = periodCntr >= periodLen
+    val periodCntr = Reg(UInt(wPeriod.W))
+   
+
+    val LLCAccessCountersReg = AccessCounters.zipWithIndex.map{ case (reg, i) => 
+        (0x20 + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCAccessCounterReg${i}", s"Total LLC accesses for domainId=${i}")))
+    }
+    val MissCounterOffset = (0x100)
+    val LLCMissCountersReg = MissCounters.zipWithIndex.map{ case (reg, i) =>
+        (MissCounterOffset + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCMissCounterReg${i}", s"Total LLC misses for domainId=${i}")))
+    }
+    val CountInstFetchReg = Seq((0x200) -> Seq(RegField(countInstFetch.getWidth, countInstFetch, RegFieldDesc("countInstFetch", "Bool count instruction fetches in access counters"))))
+    val EnableIntRegs = EnableInterrupt.zipWithIndex.map { case (reg, i) =>
+        (0x208 + i*0x8)-> Seq(RegField(reg.getWidth, reg, RegFieldDesc(s"EnableInterrupt Core ${i}", s"Enable Interrupts Core ${i}")))
+    } 
+    val CoreBudgetRegs = CoreBudgets.zipWithIndex.map { case (reg, i) => 
+        (0x300 + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"CoreBudget Core${i}", s"CoreBudget Core${i}")))
+    }
+    val PeriodSetReg = Seq((0x400) -> Seq(RegField.r(periodLen.getWidth, periodLen, RegFieldDesc(s"PeriodLength", s"Period Length"))))
+
+
+
+    periodCntr := Mux(periodCntrReset, 0.U, periodCntr + 1.U)
+
+    when (periodCntrReset) // Reset all
+    {
+        for (i <- 0 until nBanks)
+        {
+          for (j <- 0 until accCounterParams.num_cpus)
+          {
+            PerBankAccessCounters(i)(j) := 0.U
+            PerBankMissCounters(i)(j) := 0.U
+          }
+        }
+
+        for (j <- 0 until accCounterParams.num_cpus)
+        {
+            MissCounters(j) := 0.U
+            AccessCounters(j) := 0.U
+        }
+
+    }
+    .otherwise // Calculate per core total accesses
+    {
+        for (j <- 0 until accCounterParams.num_cpus)
+        {
+          val tmpSumMiss = VecInit(Seq.fill(nBanks)(0.U(64.W)))
+          val tmpSumAccess = VecInit(Seq.fill(nBanks)(0.U(64.W)))
+          tmpSumMiss(0) := PerBankMissCounters(0)(j)
+          tmpSumAccess(0) := PerBankAccessCounters(0)(j)
+          for (i <- 1 until nBanks)
+          {
+            tmpSumMiss(i) := PerBankMissCounters(i)(j) + tmpSumMiss(i-1)
+            tmpSumAccess(i) := PerBankAccessCounters(i)(j) + tmpSumAccess(i-1)
+          }
+
+          MissCounters(j) := tmpSumMiss(nBanks - 1)
+          AccessCounters(j) := tmpSumAccess(nBanks- 1)
+        }    
+    }
+
+    (io.TLIn zip io.TLOut).zipWithIndex.map { case (((in), (out)), i) => {
+        val inDomainID = Mux(in.a.fire, in.a.bits.domainId, Mux(in.c.fire, in.c.bits.domainId, 0.U))
+        val outDomainID = Mux(out.a.fire, out.a.bits.domainId, Mux(out.c.fire, out.c.bits.domainId, 0.U))
+        val aIsAcquire = in.a.bits.opcode === TLMessages.AcquireBlock
+        val aIsInstFetch = in.a.bits.opcode === TLMessages.Get && in.a.bits.address >= memBase
+        val aIsRead = aIsAcquire || (aIsInstFetch && countInstFetch)
+        val aIsWrite = (in.a.bits.opcode === TLMessages.PutFullData || in.a.bits.opcode === TLMessages.PutPartialData) && in.a.bits.address >= memBase
+        val cIsWb = in.c.bits.opcode === TLMessages.ReleaseData || in.c.bits.opcode === TLMessages.ProbeAckData
+        val outaIsAcquire = out.a.bits.opcode === TLMessages.AcquireBlock
+        val outaIsInstFetch = out.a.bits.opcode === TLMessages.Get && out.a.bits.address >= memBase
+        val outCIsWb =  in.c.bits.opcode === TLMessages.ReleaseData || in.c.bits.opcode === TLMessages.ProbeAckData
+        val isMiss = (outaIsAcquire || (outaIsInstFetch && countInstFetch)) && out.a.fire
+        val isWbToDRAM = (outCIsWb && out.c.fire)
+        val toDRAM = (isMiss || isWbToDRAM)
+        val isAccess = ((aIsWrite || aIsRead || (aIsInstFetch && countInstFetch)) && in.a.fire) || (cIsWb && in.c.fire) 
+        when (!periodCntrReset)
+        {
+            when (toDRAM)
+            {
+                PerBankMissCounters(i)(outDomainID)  := PerBankMissCounters(i)(outDomainID) + 1.U
+            }
+            when (isAccess)
+            {
+                PerBankAccessCounters(i)(inDomainID) := PerBankAccessCounters(i)(inDomainID) + 1.U
+            }
+        }
+    }}
+
+    /*
+        Generate interrupt when counter exceeds budget
+    */
+    for (i <- 0 until accCounterParams.num_cpus)
+    {
+        io.interrupt(i) := (MissCounters(i) >= CoreBudgets(i) && EnableInterrupt(i))
+    }
+
+    def YieldRegisters() : Seq[(Int, Seq[RegField])] = {
+        val mmreg = LLCAccessCountersReg ++ LLCMissCountersReg ++ CountInstFetchReg ++ CoreBudgetRegs ++ PeriodSetReg
+        mmreg
+    }
+}
 
 class InclusiveCache(
   val cache: CacheParameters,
@@ -126,7 +264,7 @@ class InclusiveCache(
       endSinkId  = InclusiveCacheParameters.all_mshrs(cache, micro),
       minLatency = 2)
     })
-
+  
   val ctlnode = control.map { c => TLRegisterNode(
     address     = Seq(AddressSet(c.address, 0xfff)),
     device      = device,
@@ -137,7 +275,8 @@ class InclusiveCache(
   lazy val module = new Impl
   class Impl extends LazyModuleImp(this) {
 
-
+    val bundleParams = node.out(0)._1.params
+    val CounterModule = new CacheAccessCounter(CacheAccessCounterParams(cache.numCPUs, bundleParams))
     
     // If you have a control port, you must have at least one cache port
     require (!ctlnode.isDefined || !node.edges.in.isEmpty)
@@ -175,61 +314,15 @@ class InclusiveCache(
     /*
       Performance Counters that we added
     */
-    val memBase = p(ExtMem).get.master.base.U
-    val countInstFetch = RegInit(true.B)
-    val AccessCounterReset = RegInit(false.B)
-    val PerBankMissCounters =  Seq.fill(node.in.length)(RegInit(VecInit(Seq.fill(cache.numCPUs)(0.U(64.W)))))
-    val PerBankAccessCounters = Seq.fill(node.in.length)(RegInit(VecInit(Seq.fill(cache.numCPUs)(0.U(64.W)))))
     assert(node.out.length == node.in.length)
 
-    // Per-CPU counters
-    val MissCounters = Seq.fill(cache.numCPUs)(RegInit(0.U(64.W)))
-    val AccessCounters = Seq.fill(cache.numCPUs)(RegInit(0.U(64.W)))
-
-    /*
-      If we do not have this here, the counters only get zeroed out when a request traverses the bank/cpu combo
-    */
-    when (AccessCounterReset)
-    {
-        for (i <- 0 until node.in.length)
-        {
-          for (j <- 0 until cache.numCPUs)
-          {
-            PerBankAccessCounters(i)(j) := 0.U
-            PerBankMissCounters(i)(j) := 0.U
-          }
-        }
-
-        for (j <- 0 until cache.numCPUs)
-        {
-            MissCounters(j) := 0.U
-            AccessCounters(j) := 0.U
-        }
-
-    }
-    .otherwise 
-    {
-        for (j <- 0 until cache.numCPUs)
-        {
-          val tmpSumMiss = VecInit(Seq.fill(node.in.length)(0.U(64.W)))
-          val tmpSumAccess = VecInit(Seq.fill(node.in.length)(0.U(64.W)))
-          tmpSumMiss(0) := PerBankMissCounters(0)(j)
-          tmpSumAccess(0) := PerBankAccessCounters(0)(j)
-          for (i <- 1 until node.in.length)
-          {
-            tmpSumMiss(i) := PerBankMissCounters(i)(j) + tmpSumMiss(i-1)
-            tmpSumAccess(i) := PerBankAccessCounters(i)(j) + tmpSumAccess(i-1)
-          }
-
-          MissCounters(j) := tmpSumMiss(node.in.length - 1)
-          AccessCounters(j) := tmpSumAccess(node.in.length - 1)
-        }    
-    }
-
    
-
-    val (intOut, _) = intSrc.out(0)
-    intOut(0) := AccessCounterReset
+    for (i <- 0 until cache.numCPUs)
+    {
+      val (intOut, _) = intSrc.out(0) // does this need to be i as well? 
+      intOut(i) := CounterModule.module.io.interrupt(i)
+    }
+    
 
     val flush32 = RegField.w(32, RegWriteFn((ivalid, oready, data) => {
       when (oready) { flushOutReady := true.B }
@@ -255,25 +348,10 @@ class InclusiveCache(
       "Base-2 logarithm of the sets per bank", reset=Some(log2Ceil(cache.sets))))))
     val lgBlockBytesR = Seq(0x18 -> Seq(RegField.r(8, log2Ceil(cache.blockBytes).U, RegFieldDesc("lgBlockBytes",
       "Base-2 logarithm of the bytes per cache block", reset=Some(log2Ceil(cache.blockBytes))))))
-
-
-    
-    val LLCAccessCounters = AccessCounters.zipWithIndex.map{ case (reg, i) => 
-      (0x20 + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCAccessCounterReg${i}", s"Total LLC accesses for domainId=${i}")))
-    }
-    val MissCounterOffset = (0x100)
-    val LLCMissCounters = MissCounters.zipWithIndex.map{ case (reg, i) =>
-      (MissCounterOffset + i * 8) -> Seq(RegField.r(reg.getWidth, reg, RegFieldDesc(s"LLCMissCounterReg${i}", s"Total LLC misses for domainId=${i}")))
-    }
-    val AccessCounterResetOffset = (0x190)
-
-    val LLCAccessCounterReset = Seq((AccessCounterResetOffset) -> Seq(RegField(AccessCounterReset.getWidth, AccessCounterReset, RegFieldDesc("LLCAccCtrReset", "Reset module for LLC access counters"))))
-    val CountInstFetchReg = Seq((AccessCounterResetOffset + 0x8) -> Seq(RegField(countInstFetch.getWidth, countInstFetch, RegFieldDesc("countInstFetch", "Bool count instruction fetches in access counters"))))
-
     val flush64Reg = Seq(0x200 ->  Seq(flush64))
     val flush32Reg = Seq(0x240 -> Seq(flush32))
 
-    val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ LLCAccessCounters ++ LLCMissCounters ++ LLCAccessCounterReset ++ CountInstFetchReg ++ flush64Reg ++ flush32Reg
+    val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ CounterModule.module.YieldRegisters() ++ flush64Reg ++ flush32Reg
     
 
 
@@ -314,45 +392,13 @@ class InclusiveCache(
       */
       //in.a.bits.domainId := i.U // set the domainID based on the input edge index
       scheduler.io.in <> in
+      
+
       out <> scheduler.io.out
       
 
       /* Performance Counters */
-      val outDomainID = scheduler.io.out.a.bits.domainId
-      val inDomainID = in.a.bits.domainId
-      when ( in.a.fire ) {
-        SynthesizePrintf("in.a.fire source %d, domainID %d, Count %d, Bank %d\n", in.a.bits.source, in.a.bits.domainId, PerBankAccessCounters(i)(inDomainID), i.U)
-      }
 
-      val aIsAcquire = in.a.bits.opcode === TLMessages.AcquireBlock
-      val aIsInstFetch = in.a.bits.opcode === TLMessages.Get && in.a.bits.address >= memBase
-      val aIsRead = aIsAcquire || (aIsInstFetch && countInstFetch)
-      val aIsWrite = (in.a.bits.opcode === TLMessages.PutFullData || in.a.bits.opcode === TLMessages.PutPartialData) && in.a.bits.address >= memBase
-      val cIsWb = in.c.bits.opcode === TLMessages.ReleaseData || in.c.bits.opcode === TLMessages.ProbeAckData
-      val outaIsAcquire = scheduler.io.out.a.bits.opcode === TLMessages.AcquireBlock
-      val outaIsInstFetch = scheduler.io.out.a.bits.opcode === TLMessages.Get && scheduler.io.out.a.bits.address >= memBase
-
-      
-      val isMiss = (outaIsAcquire || (outaIsInstFetch && countInstFetch)) && out.a.fire
-      val isAccess = ((aIsWrite || aIsRead || (aIsInstFetch && countInstFetch)) && in.a.fire) || (cIsWb && in.c.fire) 
-
-      when (!AccessCounterReset)
-      {
-        when (isMiss)
-        {
-          PerBankMissCounters(i)(outDomainID)  := PerBankMissCounters(i)(outDomainID) + 1.U
-        }
-        when (isAccess)
-        {
-          PerBankAccessCounters(i)(inDomainID) := PerBankAccessCounters(i)(inDomainID) + 1.U
-        }
-      }
-
-
-      when ( scheduler.io.out.a.fire ) {
-        SynthesizePrintf("scheduler.io.out.a.fire source %d, domainID %d, Count %d, Bank %d\n", scheduler.io.out.a.bits.source, scheduler.io.out.a.bits.domainId, PerBankMissCounters(i)(outDomainID), i.U)
-      }
-       /* Performance Counters */
 
 
       scheduler.io.ways := DontCare
