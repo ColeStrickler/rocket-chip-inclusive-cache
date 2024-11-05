@@ -60,10 +60,6 @@ class CacheAccessCounterModule(
     val nBanks = p(BankedL2Key).nBanks
     val io = IO(new CacheAccessCounterIO(nBanks, accCounterParams.num_cpus, accCounterParams.tlBundleParam))
 
-
-    
-
-
     /*
         Settings Registers
     */
@@ -271,12 +267,12 @@ class InclusiveCache(
     concurrency = 1, // Only one flush at a time (else need to track who answers)
     beatBytes   = c.beatBytes)}
   
-   val intSrc = IntSourceNode(IntSourcePortSimple(num = 1, resources = device.int))
+   val intSrc = IntSourceNode(IntSourcePortSimple(num = cache.numCPUs, resources = device.int))
   lazy val module = new Impl
   class Impl extends LazyModuleImp(this) {
 
     val bundleParams = node.out(0)._1.params
-    val CounterModule = new CacheAccessCounter(CacheAccessCounterParams(cache.numCPUs, bundleParams))
+    val CounterModule = LazyModule(new CacheAccessCounter(CacheAccessCounterParams(cache.numCPUs, bundleParams)))
     
     // If you have a control port, you must have at least one cache port
     require (!ctlnode.isDefined || !node.edges.in.isEmpty)
@@ -392,12 +388,13 @@ class InclusiveCache(
       */
       //in.a.bits.domainId := i.U // set the domainID based on the input edge index
       scheduler.io.in <> in
-      
-
       out <> scheduler.io.out
-      
 
       /* Performance Counters */
+      CounterModule.module.io.TLIn(i) <> in      
+      CounterModule.module.io.TLOut(i) <> scheduler.io.out
+
+      
 
 
 
