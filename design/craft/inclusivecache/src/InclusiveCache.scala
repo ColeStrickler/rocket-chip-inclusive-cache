@@ -30,6 +30,7 @@ import java.rmi.AccessException
 import com.fasterxml.jackson.annotation.JsonProperty.Access
 import midas.targetutils.SynthesizePrintf
 import  freechips.rocketchip.interrupts._
+import freechips.rocketchip.util.Annotated.interrupts
 
 //class AccessCounterInterruptRouter(ctl: Option[InclusiveCacheControlParameters])(implicit p: Parameters) extends TLRegisterRouter(
 //  base = ctl.map(_.address).getOrElse(0),
@@ -67,11 +68,12 @@ class InclusiveCache(
 
   val device: SimpleDevice = new SimpleDevice("cache-controller", Seq("sifive,inclusivecache0", "cache")) {
     def ofInt(x: Int) = Seq(ResourceInt(BigInt(x)))
-
+    
     override def describe(resources: ResourceBindings): Description = {
-      resourcesOpt = Some(resources)
-
+      
       val Description(name, mapping) = super.describe(resources)
+      resourcesOpt = Some(resources)
+      //val int = describeInterrupts(resources)      // interrupt description
       // Find the outer caches
       val outer = node.edges.out
         .flatMap(_.manager.managers)
@@ -92,7 +94,9 @@ class InclusiveCache(
         "cache-size"             -> ofInt(cache.sizeBytes * node.edges.in.size),
         "cache-sets"             -> ofInt(cache.sets * node.edges.in.size),
         "cache-block-size"       -> ofInt(cache.blockBytes),
-        "sifive,mshr-count"      -> ofInt(InclusiveCacheParameters.all_mshrs(cache, micro)))
+        "sifive,mshr-count"      -> ofInt(InclusiveCacheParameters.all_mshrs(cache, micro)),
+        )
+        
       Description(name, mapping ++ extra ++ nextlevel)
     }
   }
@@ -128,7 +132,8 @@ class InclusiveCache(
     device      = device,
     concurrency = 1, // Only one flush at a time (else need to track who answers)
     beatBytes   = c.beatBytes)}
-  val intSrc = IntSourceNode(IntSourcePortSimple(num = 1))
+  
+   val intSrc = IntSourceNode(IntSourcePortSimple(num = 1, resources = device.int))
   lazy val module = new Impl
   class Impl extends LazyModuleImp(this) {
 
@@ -221,8 +226,8 @@ class InclusiveCache(
         }    
     }
 
+   
 
-    
     val (intOut, _) = intSrc.out(0)
     intOut(0) := AccessCounterReset
 
