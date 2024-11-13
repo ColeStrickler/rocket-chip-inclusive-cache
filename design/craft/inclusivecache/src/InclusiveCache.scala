@@ -225,9 +225,6 @@ class InclusiveCache(
             AccessCounters(j) := 0.U
             hasInterrupted(j) := false.B
         }
-
-
-
     }
     .otherwise // Calculate per core total accesses
     {
@@ -254,6 +251,8 @@ class InclusiveCache(
       Core will generate an interrupt if it is over budget and it is the first interrupt,
       or if there is a new period and we must interrupt to let it get rid of the throttle task
     */
+
+    println(s"CACHE COUNTER intSrc.out.size = ${intSrc.out.length}, intSrc.out(0).size = ${intSrc.out(0)._1.length}")
     for (i <- 0 until cache.numCPUs)
     {
         val overBudget = MissCounters(i) >= CoreBudgets(i) && EnableInterrupt(i)        // we should take this out to do 1ms regulation
@@ -262,7 +261,7 @@ class InclusiveCache(
         {
           hasInterrupted(i) := coreDoInterrupt(i) || hasInterrupted(i)
         } 
-        val (intOut, _) = intSrc.out(0) // does this need to be i as well? 
+        val (intOut, _) = intSrc.out(0) // does this need to be i as well? --> that causes an error
         intOut(i) := coreDoInterrupt(i)
 
     }
