@@ -188,7 +188,8 @@ class InclusiveCache(
     // Regulation
     
     val periodCntr = Reg(UInt(wPeriod.W))
-    val periodCntrReset = RegInit(false.B)
+    // We must reset each period separately
+    val periodCntrReset = VecInit(Seq.fill(cache.numCPUs)(RegInit(false.B)))
     
 
     val LLCAccessCountersReg = AccessCounters.zipWithIndex.map{ case (reg, i) => 
@@ -205,48 +206,48 @@ class InclusiveCache(
     val CoreBudgetRegs = CoreBudgets.zipWithIndex.map { case (reg, i) => 
         (0x400 + i * 8) -> Seq(RegField(reg.getWidth, reg, RegFieldDesc(s"CoreBudgetCore${i}", s"CoreBudget")))
     }
-    val PeriodResetReg = Seq((0x500) -> Seq(RegField(periodCntrReset.getWidth, periodCntrReset, RegFieldDesc(s"PeriodLength", s"PeriodLength"))))
-    periodCntr := Mux(periodCntrReset, 0.U, periodCntr + 1.U)
-
-    when (periodCntrReset) // Reset all
-    {
-        for (i <- 0 until nBanks)
-        {
-          for (j <- 0 until cache.numCPUs)
-          {
-            PerBankAccessCounters(i)(j) := 0.U
-            PerBankMissCounters(i)(j) := 0.U
-          }
-        }
-
-        for (j <- 0 until cache.numCPUs)
-        {
-            MissCounters(j) := 0.U
-            AccessCounters(j) := 0.U
-            hasInterrupted(j) := false.B
-        }
 
 
-
+    val PeriodResetRegs = periodCntrReset.zipWithIndex.map{ case (reg, i) => 
+        (0x500 + i * 8) -> Seq(RegField(reg.getWidth, reg, RegFieldDesc(s"PeriodLength${i}", s"PeriodLength${i}")))
     }
-    .otherwise // Calculate per core total accesses
+
+
+
+
+    for (j <- 0 until cache.numCPUs)
     {
-        for (j <- 0 until cache.numCPUs)
-        {
-          val tmpSumMiss = VecInit(Seq.fill(nBanks)(0.U(64.W)))
-          val tmpSumAccess = VecInit(Seq.fill(nBanks)(0.U(64.W)))
-          tmpSumMiss(0) := PerBankMissCounters(0)(j)
-          tmpSumAccess(0) := PerBankAccessCounters(0)(j)
-          for (i <- 1 until nBanks)
+      when (periodCntrReset(j)) // Reset all
+      {
+          for (i <- 0 until nBanks)
           {
-            tmpSumMiss(i) := PerBankMissCounters(i)(j) + tmpSumMiss(i-1)
-            tmpSumAccess(i) := PerBankAccessCounters(i)(j) + tmpSumAccess(i-1)
+              PerBankAccessCounters(i)(j) := 0.U
+              PerBankMissCounters(i)(j) := 0.U
           }
 
-          MissCounters(j) := tmpSumMiss(nBanks - 1)
-          AccessCounters(j) := tmpSumAccess(nBanks- 1)
-        }    
+          MissCounters(j) := 0.U
+          AccessCounters(j) := 0.U
+          hasInterrupted(j) := false.B
+
+      }
+      .otherwise // Calculate per core total accesses
+      {
+            val tmpSumMiss = VecInit(Seq.fill(nBanks)(0.U(64.W)))
+            val tmpSumAccess = VecInit(Seq.fill(nBanks)(0.U(64.W)))
+            tmpSumMiss(0) := PerBankMissCounters(0)(j)
+            tmpSumAccess(0) := PerBankAccessCounters(0)(j)
+            for (i <- 1 until nBanks)
+            {
+              tmpSumMiss(i) := PerBankMissCounters(i)(j) + tmpSumMiss(i-1)
+              tmpSumAccess(i) := PerBankAccessCounters(i)(j) + tmpSumAccess(i-1)
+            }
+
+            MissCounters(j) := tmpSumMiss(nBanks - 1)
+            AccessCounters(j) := tmpSumAccess(nBanks- 1)
+
+      }
     }
+    
 
 
 
@@ -254,15 +255,17 @@ class InclusiveCache(
       Core will generate an interrupt if it is over budget and it is the first interrupt,
       or if there is a new period and we must interrupt to let it get rid of the throttle task
     */
+
+    println(s"CACHE COUNTER intSrc.out.size = ${intSrc.out.length}, intSrc.out(0).size = ${intSrc.out(0)._1.length}")
     for (i <- 0 until cache.numCPUs)
     {
         val overBudget = MissCounters(i) >= CoreBudgets(i) && EnableInterrupt(i)        // we should take this out to do 1ms regulation
         coreDoInterrupt(i) := (overBudget && EnableInterrupt(i) && !hasInterrupted(i)) //|| (hasInterrupted(i) && periodCntrReset)
-        when (!periodCntrReset) // do not drive signal twice
+        when (!periodCntrReset(i)) // do not drive signal twice
         {
           hasInterrupted(i) := coreDoInterrupt(i) || hasInterrupted(i)
         } 
-        val (intOut, _) = intSrc.out(0) // does this need to be i as well? 
+        val (intOut, _) = intSrc.out(0) // does this need to be i as well? --> that causes an error
         intOut(i) := coreDoInterrupt(i)
 
     }
@@ -295,7 +298,7 @@ class InclusiveCache(
     val flush32Reg = Seq(0x240 -> Seq(flush32))
 
     //val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ CounterModule.module.YieldRegisters() ++ flush64Reg ++ flush32Reg
-    val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++LLCAccessCountersReg ++ LLCMissCountersReg ++ CountInstFetchReg ++ EnableIntRegs ++ CoreBudgetRegs ++ PeriodResetReg ++ flush64Reg ++ flush32Reg
+    val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++LLCAccessCountersReg ++ LLCMissCountersReg ++ CountInstFetchReg ++ EnableIntRegs ++ CoreBudgetRegs ++ PeriodResetRegs ++ flush64Reg ++ flush32Reg
 
 
     val regmap = ctlnode.map{ c =>
@@ -352,12 +355,16 @@ class InclusiveCache(
       val isWbToDRAM = (outCIsWb && scheduler.io.out.c.fire)
       val toDRAM = (isMiss || isWbToDRAM)
       val isAccess = ((aIsWrite || aIsRead || (aIsInstFetch && countInstFetch)) && in.a.fire) || (cIsWb && in.c.fire) 
-      when (!periodCntrReset)
+      when (!periodCntrReset(outDomainID))
       {
           when (toDRAM)
           {
               PerBankMissCounters(i)(outDomainID)  := PerBankMissCounters(i)(outDomainID) + 1.U
           }
+      }
+
+      when (!periodCntrReset(inDomainID))
+      {
           when (isAccess)
           {
               PerBankAccessCounters(i)(inDomainID) := PerBankAccessCounters(i)(inDomainID) + 1.U
