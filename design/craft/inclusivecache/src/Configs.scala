@@ -121,7 +121,7 @@ class WithInclusiveCache(
 
     l2_inner_buffer.suggestName("InclusiveCache_inner_TLBuffer")
     l2_outer_buffer.suggestName("InclusiveCache_outer_TLBuffer")
-
+  
     l2_inner_buffer.node :*= filter.node
     l2.node :*= l2_inner_buffer.node
     l2_outer_buffer.node :*= l2.node
@@ -141,6 +141,11 @@ class WithInclusiveCache(
     l2.ctrls.foreach {
       _.ctrlnode := cbus.coupleTo("l2_ctrl") { TLBuffer(1) := TLFragmenter(cbus, Some("LLCCtrl")) := _ }
     }
+
+    l2.ctlnode.foreach {
+      _ := cbus.coupleTo("l2_ctrlnode") { TLBuffer(1) := TLFragmenter(cbus) := _ }
+    }
+
 
     ElaborationArtefacts.add("l2.json", l2.module.json)
     (filter.node, lastLevelNode, None)
