@@ -55,7 +55,7 @@ class SourceA(params: InclusiveCacheParameters) extends Module
   a.bits.mask    := ~0.U(params.outer.manager.beatBytes.W)
   a.bits.data    := 0.U
   a.bits.corrupt := false.B
-  a.bits.dm     := false.B // set for now
+ // a.bits.dm     := false.B // set for now
 
   //a.bits.dm      := true.B // change this later
 }

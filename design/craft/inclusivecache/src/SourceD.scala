@@ -265,7 +265,7 @@ class SourceD(params: InclusiveCacheParameters) extends Module
   atomics.io.a.mask    := s4_pdata.mask
   atomics.io.a.data    := s4_pdata.data
   atomics.io.a.corrupt := DontCare
-  atomics.io.a.dm      := false.B
+ // atomics.io.a.dm      := false.B
   atomics.io.data_in   := s4_rdata
 
   io.bs_wadr.valid := s4_full && s4_need_bs
