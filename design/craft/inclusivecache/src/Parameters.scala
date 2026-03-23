@@ -172,6 +172,7 @@ case class InclusiveCacheParameters(
     if (x == 0) tail.reverse else bitOffsets(x >> 1, offset + 1, if ((x & 1) == 1) offset :: tail else tail)
   val addressMapping = bitOffsets(pickMask)
   val addressBits = addressMapping.size
+  println(f"\n\n\n\n\n\n\n Cache Address Bits ${addressBits} \n\n\n\n\n\n")
 
   // println(s"addresses: ${flatAddresses} => ${pickMask} => ${addressBits}")
 
