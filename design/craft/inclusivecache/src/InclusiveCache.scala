@@ -141,11 +141,17 @@ class InclusiveCache(
     /*
         Per-CacheBank counters
     */
-    val PerBankMissCounters =  Seq.fill(nBanks)(RegInit((0.U(64.W))))
-    val PerBankAccessCounters = Seq.fill(nBanks)(RegInit((0.U(64.W))))
 
-    val TotalMissCounter = RegInit(0.U(64.W))
-    val TotalAccessCounter = RegInit(0.U(64.W))
+
+
+    val PerBankl1Refill = Seq.fill(nBanks)(RegInit((0.U(64.W))))
+    val PerBankl1Writeback = Seq.fill(nBanks)(RegInit((0.U(64.W))))
+    val PerBankl2Refill = Seq.fill(nBanks)(RegInit((0.U(64.W))))
+    val PerBankl2Writeback = Seq.fill(nBanks)(RegInit((0.U(64.W))))
+    val Totall1Refill = RegInit((0.U(64.W)))
+    val Totall1Writeback = RegInit((0.U(64.W)))
+    val Totall2Refill = RegInit((0.U(64.W)))
+    val Totall2Writeback = RegInit((0.U(64.W)))
 
 
     val CountInstFetchReg = Seq((0x300) -> Seq(RegField(countInstFetch.getWidth, countInstFetch, RegFieldDesc("countInstFetch", "Bool count instruction fetches in access counters"))))
@@ -153,14 +159,15 @@ class InclusiveCache(
         (0x308 + i*0x8)-> Seq(RegField(reg.getWidth, reg, RegFieldDesc(s"EnableInterruptCore${i}", s"EnableInterruptsCore")))
     } 
 
-    val TotalMissCountRegs = Seq((0x600) -> Seq(RegField(TotalMissCounter.getWidth, TotalMissCounter, RegFieldDesc("totalmisscount", "total misscount"))))
-    val TotalAccessCountRegs = Seq((0x608) -> Seq(RegField(TotalAccessCounter.getWidth, TotalAccessCounter, RegFieldDesc("totalaccesscount", "total accesscount"))))
+    val TotalL1RefillRegs     = Seq((0x600) -> Seq(RegField(Totall1Refill.getWidth, Totall1Refill, RegFieldDesc("totalmisscount", "total misscount"))))
+    val TotalL1WritebackRegs  = Seq((0x608) -> Seq(RegField(Totall1Writeback.getWidth, Totall1Writeback, RegFieldDesc("totalaccesscount", "total accesscount"))))
+    val TotalL2RefillRegs     = Seq((0x610) -> Seq(RegField(Totall2Refill.getWidth, Totall2Refill, RegFieldDesc("totalmisscount", "total misscount"))))
+    val TotalL2WritebackRegs  = Seq((0x618) -> Seq(RegField(Totall2Writeback.getWidth, Totall2Writeback, RegFieldDesc("totalaccesscount", "total accesscount"))))
 
-
-
-    TotalMissCounter := VecInit(PerBankMissCounters).reduce(_ + _)
-    TotalAccessCounter := VecInit(PerBankAccessCounters).reduce(_ + _)
-
+    Totall1Refill := VecInit(PerBankl1Refill).reduce(_+_)
+    Totall1Writeback := VecInit(PerBankl1Writeback).reduce(_+_)
+    Totall2Refill := VecInit(PerBankl2Refill).reduce(_+_)
+    Totall2Writeback := VecInit(PerBankl2Writeback).reduce(_+_)
 
 
  
@@ -175,7 +182,7 @@ class InclusiveCache(
 
 
     //val mmreg = banksR ++ waysR ++ lgSetsR ++ lgBlockBytesR ++ CounterModule.module.YieldRegisters() ++ flush64Reg ++ flush32Reg
-    val mmreg = CountInstFetchReg ++ EnableIntRegs ++ TotalAccessCountRegs ++ TotalMissCountRegs
+    val mmreg = CountInstFetchReg ++ EnableIntRegs ++  TotalL1RefillRegs ++ TotalL1WritebackRegs ++ TotalL2RefillRegs ++ TotalL2WritebackRegs
 
 
     val regmap = ctlnode.map{ c =>
@@ -225,6 +232,10 @@ class InclusiveCache(
        /*Performance Counters*/
       val inDomainID = 0.U//Mux(in.a.fire, in.a.bits.domainId, Mux(in.c.fire, in.c.bits.domainId, 0.U))
       val outDomainID = 0.U//Mux(scheduler.io.out.a.fire, scheduler.io.out.a.bits.domainId, Mux(scheduler.io.out.c.fire, scheduler.io.out.c.bits.domainId, 0.U))
+
+
+
+
       val aIsAcquire = in.a.bits.opcode === TLMessages.AcquireBlock
       val aIsInstFetch = in.a.bits.opcode === TLMessages.Get && in.a.bits.address >= membase.U
       val aIsRead = aIsAcquire || (aIsInstFetch && countInstFetch)
@@ -232,13 +243,8 @@ class InclusiveCache(
       val cIsWb = in.c.bits.opcode === TLMessages.ReleaseData || in.c.bits.opcode === TLMessages.ProbeAckData
       val outaIsAcquire = scheduler.io.out.a.bits.opcode === TLMessages.AcquireBlock
       val outaIsInstFetch = scheduler.io.out.a.bits.opcode === TLMessages.Get && scheduler.io.out.a.bits.address >= membase.U
-      
 
-      //val toDRAM = (isMiss || isWbToDRAM)
-
-
-
-
+      //val toDRAM = (isMiss || isWbToDRAM
       val outCIsWb =  (out.c.bits.opcode === TLMessages.ReleaseData || out.c.bits.opcode === TLMessages.ProbeAckData)
       val outAIsWrite = (out.a.bits.opcode === TLMessages.PutFullData || out.a.bits.opcode === TLMessages.PutPartialData)
       val outAIsRead = (out.a.bits.opcode === TLMessages.Get || out.a.bits.opcode === TLMessages.AcquireBlock)
@@ -254,12 +260,16 @@ class InclusiveCache(
       
       val l1Refill = in.d.fire && edgeIn.first(in.d) && (in.d.bits.opcode === TLMessages.GrantData)
       val l1WriteBack = (in.c.fire && edgeIn.first(in.c) && (inCIsWb))
-      val l2Refill = out.d.fire && edgeOut.first(out.d) && (out.d.bits.opcode === TLMessages.GrantData)
-
       
-      PerBankAccessCounters(i) := PerBankAccessCounters(i) + l1Refill.asUInt + l1WriteBack.asUInt
-      PerBankMissCounters(i) := PerBankMissCounters(i) + l2Refill
-
+      
+      val l2Refill = out.a.fire && (out.a.bits.opcode === TLMessages.AcquireBlock) //out.d.fire && edgeOut.first(out.d) && (out.d.bits.opcode === TLMessages.GrantData)
+      val l2WriteBack = (out.c.fire && edgeOut.first(out.c)) && (out.c.bits.opcode === TLMessages.ReleaseData)
+      
+      
+      PerBankl1Refill(i) := PerBankl1Refill(i)  + l1Refill.asUInt
+      PerBankl2Refill(i) := PerBankl2Refill(i)  + l2Refill.asUInt
+      PerBankl1Writeback(i) := PerBankl1Writeback(i)  + l1WriteBack.asUInt
+      PerBankl2Writeback(i) := PerBankl2Writeback(i)  + l2WriteBack.asUInt
 
 
 
