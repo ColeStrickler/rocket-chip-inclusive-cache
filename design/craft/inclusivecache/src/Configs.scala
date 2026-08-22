@@ -26,6 +26,7 @@ import sifive.blocks.inclusivecache._
 import freechips.rocketchip.devices.tilelink._
 import freechips.rocketchip.util._
 import sifive.blocks.inclusivecache.InclusiveCacheParameters
+import _root_.subsystem.rme.{RME, RelMemParams, TLSourceExpander}
 
 case class InclusiveCacheParams(
   ways: Int,
@@ -43,7 +44,7 @@ case class InclusiveCacheParams(
   bufInnerExterior: InclusiveCachePortParameters = InclusiveCachePortParameters.flowAD,
   bufOuterInterior: InclusiveCachePortParameters = InclusiveCachePortParameters.full,
   bufOuterExterior: InclusiveCachePortParameters = InclusiveCachePortParameters.none)
-
+ 
 case object InclusiveCacheKey extends Field[InclusiveCacheParams]
 
 class WithInclusiveCache(
@@ -69,6 +70,8 @@ class WithInclusiveCache(
     implicit val p = context.p
     val sbus = context.tlBusWrapperLocationMap(SBUS)
     val cbus = context.tlBusWrapperLocationMap.lift(CBUS).getOrElse(sbus)
+    val pbus = context.tlBusWrapperLocationMap.lift(PBUS).getOrElse(sbus)
+    assert(pbus != None)
     val InclusiveCacheParams(
       ways,
       sets,
@@ -90,6 +93,10 @@ class WithInclusiveCache(
         beatBytes = cbus.beatBytes,
         bankedControl = bankedControl)
     }
+    val dtu = Some(LazyModule(new RME(RelMemParams())))
+
+    
+
     val l2 = LazyModule(new InclusiveCache(
       CacheParameters(
         level = 2,
@@ -118,18 +125,42 @@ class WithInclusiveCache(
     val l2_inner_buffer = bufInnerExterior()
     val l2_outer_buffer = bufOuterExterior()
     val cork = LazyModule(new TLCacheCork)
-    val lastLevelNode = cork.node
 
     l2_inner_buffer.suggestName("InclusiveCache_inner_TLBuffer")
     l2_outer_buffer.suggestName("InclusiveCache_outer_TLBuffer")
 
-    l2_inner_buffer.node :*= filter.node
-    l2.node :*= l2_inner_buffer.node
+val l2InnerXbar = LazyModule(new TLXbar)
+
+l2InnerXbar.node :*= filter.node
+l2InnerXbar.node := dtu.get.toLLCNode
+
+l2_inner_buffer.node :*= l2InnerXbar.node
+l2.node :*= l2_inner_buffer.node
     l2_outer_buffer.node :*= l2.node
+    // DTU injects directly into the same L2 ingress
+
+
+    val xbar = LazyModule(new TLXbar)
+    dtu.get.dtu_cached_region := xbar.node
+    val lastLevelNode = dtu.get.node
+    
+    InModuleBody {
+      val dtuOut = dtu.get.module.io
+
+      l2.module.io.DTU_DirectoryIOIn.valid :=
+        dtuOut.DTU_DirectoryIOIn.valid
+
+      l2.module.io.DTU_DirectoryIOIn.bits :=
+        dtuOut.DTU_DirectoryIOIn.bits
+
+      dtuOut.DTU_DirectoryIOOut.valid := l2.module.io.DTU_DirectoryIOOut.valid
+      dtuOut.DTU_DirectoryIOOut.bits := l2.module.io.DTU_DirectoryIOOut.bits
+    }
 
     /* PhysicalFilters need to be on the TL-C side of a CacheCork to prevent Acquire.NtoB -> Grant.toT */
     physicalFilter match {
-      case None => lastLevelNode :*= l2_outer_buffer.node
+      //case None => lastLevelNode :*= l2_outer_buffer.node
+      case None => dtu.get.node :*= xbar.node :*= TLSourceExpander(1).node :*=* cork.node :*= l2_outer_buffer.node
       case Some(fp) => {
         val physicalFilter = LazyModule(new PhysicalFilter(fp.copy(controlBeatBytes = cbus.beatBytes)))
         lastLevelNode :*= physicalFilter.node :*= l2_outer_buffer.node
@@ -138,6 +169,20 @@ class WithInclusiveCache(
         }
       }
     }
+
+
+    val portName = "dram-bru"
+    pbus.coupleTo(portName) {
+      dtu.get.ctlnode := 
+      TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _ }
+    dtu.get.agu_vec.foreach{ agu => 
+      pbus.coupleTo(portName) {
+        agu.ctlnode := 
+        TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _ 
+      }
+    }
+
+
 
     l2.ctrls.foreach {
       _.ctrlnode := cbus.coupleTo("l2_ctrl") { TLBuffer(1) := TLFragmenter(cbus, Some("LLCCtrl")) := _ }

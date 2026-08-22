@@ -25,6 +25,7 @@ import freechips.rocketchip.tilelink._
 import MetaData._
 import chisel3.experimental.dataview._
 import freechips.rocketchip.util.DescribedSRAM
+import midas.targetutils.SynthesizePrintf
 
 class DirectoryEntry(params: InclusiveCacheParameters) extends InclusiveCacheBundle(params)
 {
@@ -53,12 +54,16 @@ class DirectoryResult(params: InclusiveCacheParameters) extends DirectoryEntry(p
   val way = UInt(params.wayBits.W)
 }
 
+
+
 class Directory(params: InclusiveCacheParameters) extends Module
 {
   val io = IO(new Bundle {
     val write  = Flipped(Decoupled(new DirectoryWrite(params)))
     val read   = Flipped(Valid(new DirectoryRead(params))) // sees same-cycle write
     val result = Valid(new DirectoryResult(params))
+    val DTU_DirectoryIOIn = Flipped(Valid(UInt(48.W)))
+    val DTU_DirectoryIOOut = Valid(Bool())
     val ready  = Bool() // reset complete; can enable access
   })
 
@@ -99,6 +104,29 @@ class Directory(params: InclusiveCacheParameters) extends Module
       VecInit.fill(params.cache.ways) { Mux(wipeDone, write.bits.data.asUInt, 0.U) },
       UIntToOH(write.bits.way, params.cache.ways).asBools.map(_ || !wipeDone))
   }
+
+
+  val dtu_read_port_valid = io.DTU_DirectoryIOIn.valid
+  io.DTU_DirectoryIOOut.bits := false.B
+  io.DTU_DirectoryIOOut.valid := io.DTU_DirectoryIOIn.valid
+  val (dtu_read_tag, dtu_read_set, dtu_read_offset) = params.parseAddress(io.DTU_DirectoryIOIn.bits)
+  when (dtu_read_port_valid)
+  {
+    SynthesizePrintf("Check address 0x%x\n", io.DTU_DirectoryIOIn.bits)
+      val dtu_set_data = cc_dir.read(dtu_read_set, dtu_read_port_valid)
+      val dtu_ways = dtu_set_data.map(d => d.asTypeOf(new DirectoryEntry(params)))
+      val dtu_hits = Cat(dtu_ways.zipWithIndex.map { case (w, i) =>
+        w.tag === dtu_read_tag && w.state =/= INVALID
+      }.reverse)
+
+      val dtu_data_in_cache = dtu_hits.orR
+      io.DTU_DirectoryIOOut.bits := dtu_data_in_cache
+      when (dtu_data_in_cache)
+      {
+        SynthesizePrintf("DTU request hit!\n")
+      }
+  }
+
 
   val ren1 = RegInit(false.B)
   val ren2 = if (params.micro.dirReg) RegInit(false.B) else ren1
