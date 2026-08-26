@@ -143,19 +143,21 @@ class InclusiveCacheBankScheduler(params: InclusiveCacheParameters) extends Modu
   sourceE.io.req.valid := schedule.e.valid
   sourceX.io.req.valid := schedule.x.valid
 
-  sourceA.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.a.bits)) := schedule.a.bits
-  sourceB.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.b.bits)) := schedule.b.bits
-  sourceC.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.c.bits)) := schedule.c.bits
-  sourceD.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.d.bits)) := schedule.d.bits
-  sourceE.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.e.bits)) := schedule.e.bits
-  sourceX.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.x.bits)) := schedule.x.bits
+
+  // MSHRs send out requests to sources
+  sourceA.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.a.bits)) := schedule.a.bits // this is a mux over all MSHRs 
+  sourceB.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.b.bits)) := schedule.b.bits // this is a mux over all MSHRs
+  sourceC.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.c.bits)) := schedule.c.bits // this is a mux over all MSHRs
+  sourceD.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.d.bits)) := schedule.d.bits // this is a mux over all MSHRs
+  sourceE.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.e.bits)) := schedule.e.bits // this is a mux over all MSHRs
+  sourceX.io.req.bits.viewAsSupertype(chiselTypeOf(schedule.x.bits)) := schedule.x.bits // this is a mux over all MSHRs
 
   directory.io.write.valid := schedule.dir.valid
   directory.io.write.bits.viewAsSupertype(chiselTypeOf(schedule.dir.bits)) := schedule.dir.bits
 
   // Forward meta-data changes from nested transaction completion
-  val select_c  = mshr_selectOH(params.mshrs-1)
-  val select_bc = mshr_selectOH(params.mshrs-2)
+  val select_c  = mshr_selectOH(params.mshrs-1) // higher priority for deadlock prevention
+  val select_bc = mshr_selectOH(params.mshrs-2) // higher priority for deadlock prevention
   nestedwb.set   := Mux(select_c, c_mshr.io.status.bits.set, bc_mshr.io.status.bits.set)
   nestedwb.tag   := Mux(select_c, c_mshr.io.status.bits.tag, bc_mshr.io.status.bits.tag)
   nestedwb.b_toN       := select_bc && bc_mshr.io.schedule.bits.dir.valid && bc_mshr.io.schedule.bits.dir.bits.data.state === MetaData.INVALID
@@ -167,14 +169,14 @@ class InclusiveCacheBankScheduler(params: InclusiveCacheParameters) extends Modu
   val request = Wire(Decoupled(new FullRequest(params)))
   request.valid := directory.io.ready && (sinkA.io.req.valid || sinkX.io.req.valid || sinkC.io.req.valid)
   request.bits := Mux(sinkC.io.req.valid, sinkC.io.req.bits,
-                  Mux(sinkX.io.req.valid, sinkX.io.req.bits, sinkA.io.req.bits))
-  sinkC.io.req.ready := directory.io.ready && request.ready
-  sinkX.io.req.ready := directory.io.ready && request.ready && !sinkC.io.req.valid
-  sinkA.io.req.ready := directory.io.ready && request.ready && !sinkC.io.req.valid && !sinkX.io.req.valid
+                  Mux(sinkX.io.req.valid, sinkX.io.req.bits, sinkA.io.req.bits)) // C > X > A
+  sinkC.io.req.ready := directory.io.ready && request.ready // C > X > A
+  sinkX.io.req.ready := directory.io.ready && request.ready && !sinkC.io.req.valid // C > X > A
+  sinkA.io.req.ready := directory.io.ready && request.ready && !sinkC.io.req.valid && !sinkX.io.req.valid // C > X > A
 
   // If no MSHR has been assigned to this set, we need to allocate one
   val setMatches = Cat(mshrs.map { m => m.io.status.valid && m.io.status.bits.set === request.bits.set }.reverse)
-  val alloc = !setMatches.orR // NOTE: no matches also means no BC or C pre-emption on this set
+  val alloc = !setMatches.orR // NOTE: no matches also means no BC or C pre-emption on this set --> NO MATCHES
   // If a same-set MSHR says that requests of this type must be blocked (for bounded time), do it
   val blockB = Mux1H(setMatches, mshrs.map(_.io.status.bits.blockB)) && request.bits.prio(1)
   val blockC = Mux1H(setMatches, mshrs.map(_.io.status.bits.blockC)) && request.bits.prio(2)
@@ -271,7 +273,7 @@ class InclusiveCacheBankScheduler(params: InclusiveCacheParameters) extends Modu
   directory.io.read.bits.tag := Mux(mshr_uses_directory_for_lb, requests.io.data.tag, request.bits.tag)
 
 
-  // DTU Interface
+  // DTU Interface --> we need to buffer this, SyncReadMem takes an extra cycle
   directory.io.DTU_DirectoryIOIn.bits := io.DTU_DirectoryIOIn.bits
   directory.io.DTU_DirectoryIOIn.valid := io.DTU_DirectoryIOIn.valid
   io.DTU_DirectoryIOOut.valid := directory.io.DTU_DirectoryIOOut.valid
