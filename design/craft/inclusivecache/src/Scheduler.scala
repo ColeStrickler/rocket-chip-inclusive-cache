@@ -35,6 +35,10 @@ class InclusiveCacheBankScheduler(params: InclusiveCacheParameters) extends Modu
     // Control port
     val req = Flipped(Decoupled(new SinkXRequest(params)))
     val resp = Decoupled(new SourceXRequest(params))
+
+    // DTU Interface
+    val DTU_DirectoryIOIn = Flipped(Valid(UInt(48.W)))
+    val DTU_DirectoryIOOut = Valid(Bool())
   })
 
   val sourceA = Module(new SourceA(params))
@@ -450,6 +454,14 @@ class InclusiveCacheBankScheduler(params: InclusiveCacheParameters) extends Modu
   bankedStore.io.sourceD_wdat := sourceD.io.bs_wdat
   sourceC.io.bs_dat := bankedStore.io.sourceC_dat
   sourceD.io.bs_rdat := bankedStore.io.sourceD_rdat
+
+
+    // DTU Interface --> we need to buffer this, SyncReadMem takes an extra cycle
+  directory.io.DTU_DirectoryIOIn.bits := io.DTU_DirectoryIOIn.bits
+  directory.io.DTU_DirectoryIOIn.valid := io.DTU_DirectoryIOIn.valid
+  io.DTU_DirectoryIOOut.valid := directory.io.DTU_DirectoryIOOut.valid
+  io.DTU_DirectoryIOOut.bits := directory.io.DTU_DirectoryIOOut.bits
+
 
   // SourceD data hazard interlock
   sourceD.io.evict_req := sourceC.io.evict_req

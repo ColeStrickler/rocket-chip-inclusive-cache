@@ -26,7 +26,7 @@ import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.subsystem.{SubsystemBankedCoherenceKey}
 import freechips.rocketchip.regmapper._
 import freechips.rocketchip.tilelink._
-
+import midas.targetutils.SynthesizePrintf
 class InclusiveCache(
   val cache: CacheParameters,
   val micro: InclusiveCacheMicroParameters,
@@ -108,6 +108,13 @@ class InclusiveCache(
   class Impl extends LazyModuleImp(this) {
     // If you have a control port, you must have at least one cache port
     require (ctrls.isEmpty || !node.edges.in.isEmpty)
+     val io = IO(new Bundle {
+      // DTU Interface
+      val DTU_DirectoryIOIn = Flipped(Valid(UInt(48.W)))
+      val DTU_DirectoryIOOut = Valid(Bool())
+    })
+
+
 
     // Extract the client IdRanges; must be the same on all ports!
     val clientIds = node.edges.in.headOption.map(_.client.clients.map(_.sourceId).sortBy(_.start))
@@ -135,7 +142,10 @@ class InclusiveCache(
 
       val params = InclusiveCacheParameters(cache, micro, !ctrls.isEmpty, edgeIn, edgeOut)
       val scheduler = Module(new InclusiveCacheBankScheduler(params)).suggestName("inclusive_cache_bank_sched")
-
+      when (in.a.fire)
+      {
+        SynthesizePrintf("(LLC) Received request 0x%x source %d\n", in.a.bits.address, in.a.bits.source)
+      }
       scheduler.io.in <> in
       out <> scheduler.io.out
       scheduler.io.ways := DontCare
@@ -146,6 +156,15 @@ class InclusiveCache(
       scheduler.io.req.bits.address := 0.U
       scheduler.io.req.bits.invalidate := false.B
       scheduler.io.resp.ready := true.B
+
+      // DTU Interface
+      scheduler.io.DTU_DirectoryIOIn.bits := io.DTU_DirectoryIOIn.bits
+      scheduler.io.DTU_DirectoryIOIn.valid := io.DTU_DirectoryIOIn.valid
+      io.DTU_DirectoryIOOut.valid := scheduler.io.DTU_DirectoryIOOut.valid
+      io.DTU_DirectoryIOOut.bits := scheduler.io.DTU_DirectoryIOOut.bits
+
+
+ 
 
 
       // Fix-up the missing addresses. We do this here so that the Scheduler can be
