@@ -95,7 +95,8 @@ class InclusiveCache(
       },
       beatBytes  = cache.beatBytes,
       endSinkId  = InclusiveCacheParameters.all_mshrs(cache, micro),
-      minLatency = 2)
+      minLatency = 2,
+      requestKeys = Seq(DeterministicMemory))
     })
 
   val ctrls = control.map { c =>
@@ -144,7 +145,8 @@ class InclusiveCache(
       val scheduler = Module(new InclusiveCacheBankScheduler(params)).suggestName("inclusive_cache_bank_sched")
       when (in.a.fire)
       {
-        SynthesizePrintf("(LLC) Received request 0x%x source %d\n", in.a.bits.address, in.a.bits.source)
+        SynthesizePrintf("[DM_INCLUSIVE_A] paddr=0x%x dm=%d opcode=%d source=%d\n",
+          in.a.bits.address, in.a.bits.user(DeterministicMemory), in.a.bits.opcode, in.a.bits.source)
       }
       scheduler.io.in <> in
       out <> scheduler.io.out
