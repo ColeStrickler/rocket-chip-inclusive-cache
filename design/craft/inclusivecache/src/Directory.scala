@@ -111,24 +111,24 @@ class Directory(params: InclusiveCacheParameters) extends Module
 
 
   val dtu_read_port_valid = io.DTU_DirectoryIOIn.valid
-  io.DTU_DirectoryIOOut.bits := false.B
-  io.DTU_DirectoryIOOut.valid := io.DTU_DirectoryIOIn.valid
-  val (dtu_read_tag, dtu_read_set, dtu_read_offset) = params.parseAddress(io.DTU_DirectoryIOIn.bits)
-  when (dtu_read_port_valid)
-  {
-    SynthesizePrintf("Check address 0x%x\n", io.DTU_DirectoryIOIn.bits)
-      val dtu_set_data = cc_dir.read(dtu_read_set, dtu_read_port_valid)
-      val dtu_ways = dtu_set_data.map(d => d.asTypeOf(new DirectoryEntry(params)))
-      val dtu_hits = Cat(dtu_ways.zipWithIndex.map { case (w, i) =>
-        w.tag === dtu_read_tag && w.state =/= INVALID
-      }.reverse)
+  val (dtu_read_tag, dtu_read_set, _) = params.parseAddress(io.DTU_DirectoryIOIn.bits)
+  val dtu_set_data = cc_dir.read(dtu_read_set, dtu_read_port_valid)
+  val dtu_response_valid = RegNext(dtu_read_port_valid, false.B)
+  val dtu_response_tag = RegEnable(dtu_read_tag, dtu_read_port_valid)
+  val dtu_ways = dtu_set_data.map(d => d.asTypeOf(new DirectoryEntry(params)))
+  val dtu_hits = Cat(dtu_ways.map { w =>
+    w.tag === dtu_response_tag && w.state =/= INVALID
+  }.reverse)
+  val dtu_data_in_cache = dtu_hits.orR
 
-      val dtu_data_in_cache = dtu_hits.orR
-      io.DTU_DirectoryIOOut.bits := dtu_data_in_cache
-      when (dtu_data_in_cache)
-      {
-        SynthesizePrintf("DTU request hit!\n")
-      }
+  io.DTU_DirectoryIOOut.valid := dtu_response_valid
+  io.DTU_DirectoryIOOut.bits := dtu_data_in_cache
+
+  when (dtu_read_port_valid) {
+    SynthesizePrintf("Check address 0x%x\n", io.DTU_DirectoryIOIn.bits)
+  }
+  when (dtu_response_valid && dtu_data_in_cache) {
+    SynthesizePrintf("DTU request hit!\n")
   }
 
 

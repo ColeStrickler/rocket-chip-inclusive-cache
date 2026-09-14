@@ -28,6 +28,7 @@ import freechips.rocketchip.prci.{ClockCrossingType, NoCrossing}
 import freechips.rocketchip.util._
 import sifive.blocks.inclusivecache.InclusiveCacheParameters
 import _root_.subsystem.rme.{RME, RelMemParams, TLSourceExpander}
+import chisel3._
 
 case class InclusiveCacheParams(
   ways: Int,
@@ -135,7 +136,7 @@ class WithInclusiveCache(
     val l2InnerXbar = LazyModule(new TLXbar)
 
       l2InnerXbar.node :*= filter.node
-      l2InnerXbar.node := dtu.get.toLLCNode
+      /*l2InnerXbar.node := dtu.get.toLLCNode*/
 
       l2_inner_buffer.node :*= l2InnerXbar.node
       l2.node :*= l2_inner_buffer.node
@@ -148,10 +149,14 @@ class WithInclusiveCache(
     dtu.get.dtu_cached_region := xbar.node
     val lastLevelNode = dtu.get.node
 
+    
+    //val lastLevelNode = xbar.node
+
+    
     InModuleBody {
       val dtuOut = dtu.get.module.io
 
-      l2.module.io.DTU_DirectoryIOIn.valid :=
+      l2.module.io.DTU_DirectoryIOIn.valid := 
         dtuOut.DTU_DirectoryIOIn.valid
 
       l2.module.io.DTU_DirectoryIOIn.bits :=
@@ -164,7 +169,7 @@ class WithInclusiveCache(
     /* PhysicalFilters need to be on the TL-C side of a CacheCork to prevent Acquire.NtoB -> Grant.toT */
     physicalFilter match {
       //case None => lastLevelNode :*= l2_outer_buffer.node
-      case None => dtu.get.node :*= xbar.node :*= TLSourceExpander(1).node :*=* cork.node :*= l2_outer_buffer.node
+      case None => dtu.get.node :*=* xbar.node :*= TLSourceExpander(1).node :*=* cork.node :*= l2_outer_buffer.node
       case Some(fp) => {
         val physicalFilter = LazyModule(new PhysicalFilter(fp.copy(controlBeatBytes = cbus.beatBytes)))
         lastLevelNode :*= physicalFilter.node :*= l2_outer_buffer.node
@@ -175,6 +180,8 @@ class WithInclusiveCache(
     }
 
        val portName = "dram-bru"
+
+      
     pbus.coupleTo(portName) {
       dtu.get.ctlnode := 
       TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _ }
@@ -184,7 +191,9 @@ class WithInclusiveCache(
         TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _ 
       }
     }
-
+  sbus.coupleFrom("dtu_to_llc") { bus =>
+    bus := dtu.get.toLLCNode
+  }
 
 
 
