@@ -144,7 +144,7 @@ class InclusiveCache(
       val scheduler = Module(new InclusiveCacheBankScheduler(params)).suggestName("inclusive_cache_bank_sched")
       when (in.a.fire)
       {
-        SynthesizePrintf("(LLC) Received request 0x%x source %d\n", in.a.bits.address, in.a.bits.source)
+        //SynthesizePrintf("(LLC) Received request 0x%x source %d\n", in.a.bits.address, in.a.bits.source)
       }
       scheduler.io.in <> in
       out <> scheduler.io.out
