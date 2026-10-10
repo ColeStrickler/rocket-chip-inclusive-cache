@@ -28,6 +28,9 @@ import freechips.rocketchip.regmapper._
 import freechips.rocketchip.tilelink._
 import midas.targetutils.SynthesizePrintf
 import freechips.rocketchip.util._
+import freechips.rocketchip.subsystem.ExtMem
+
+
 class InclusiveCache(
   val cache: CacheParameters,
   val micro: InclusiveCacheMicroParameters,
@@ -40,7 +43,7 @@ class InclusiveCache(
   val atom = TransferSizes(1, cache.beatBytes)
 
   var resourcesOpt: Option[ResourceBindings] = None
-
+   val device2 : SimpleDevice = new SimpleDevice("cache-pmu", Seq("sifive,inclusivecache0", "cache"))
   val device: SimpleDevice = new SimpleDevice("cache-controller", Seq("sifive,inclusivecache0", "cache")) {
     def ofInt(x: Int) = Seq(ResourceInt(BigInt(x)))
 
@@ -98,6 +101,11 @@ class InclusiveCache(
       endSinkId  = InclusiveCacheParameters.all_mshrs(cache, micro),
       minLatency = 2)
     })
+          val ctlnode = control.map { c => TLRegisterNode(
+    address     = Seq(AddressSet(c.address + 0x100000, 0xfff)),
+    device      = device2,
+    concurrency = 1, // Only one flush at a time (else need to track who answers)
+    beatBytes   = c.beatBytes)}
 
   val ctrls = control.map { c =>
     val nCtrls = if (c.bankedControl) p(SubsystemBankedCoherenceKey).nBanks else 1
@@ -130,9 +138,36 @@ class InclusiveCache(
       println("")
     }
 
-    val reads = Seq.fill(node.in.size)(WireDefault(false.B))
-    val writes_put = Seq.fill(node.in.size)(WireDefault(false.B))
-    val writes_rel = Seq.fill(node.in.size)(WireDefault(false.B))
+    val nBanks = p(SubsystemBankedCoherenceKey).nBanks
+      val membase =  p(ExtMem).get.master.base
+    val PerBankl1Refill = Seq.fill(nBanks)(RegInit((0.U(64.W))))
+    val PerBankl1Writeback = Seq.fill(nBanks)(RegInit((0.U(64.W))))
+    val PerBankl2Refill = Seq.fill(nBanks)(RegInit((0.U(64.W))))
+    val PerBankl2Writeback = Seq.fill(nBanks)(RegInit((0.U(64.W))))
+    val Totall1Refill = RegInit((0.U(64.W)))
+    val Totall1Writeback = RegInit((0.U(64.W)))
+    val Totall2Refill = RegInit((0.U(64.W)))
+    val Totall2Writeback = RegInit((0.U(64.W)))
+
+
+
+    val TotalL1RefillRegs     = Seq((0x600) -> Seq(RegField(Totall1Refill.getWidth, Totall1Refill, RegFieldDesc("totalmisscount", "total misscount"))))
+    val TotalL1WritebackRegs  = Seq((0x608) -> Seq(RegField(Totall1Writeback.getWidth, Totall1Writeback, RegFieldDesc("totalaccesscount", "total accesscount"))))
+    val TotalL2RefillRegs     = Seq((0x610) -> Seq(RegField(Totall2Refill.getWidth, Totall2Refill, RegFieldDesc("totalmisscount", "total misscount"))))
+    val TotalL2WritebackRegs  = Seq((0x618) -> Seq(RegField(Totall2Writeback.getWidth, Totall2Writeback, RegFieldDesc("totalaccesscount", "total accesscount"))))
+
+    Totall1Refill := VecInit(PerBankl1Refill).reduce(_+_)
+    Totall1Writeback := VecInit(PerBankl1Writeback).reduce(_+_)
+    Totall2Refill := VecInit(PerBankl2Refill).reduce(_+_)
+    Totall2Writeback := VecInit(PerBankl2Writeback).reduce(_+_)
+
+    val mmreg =  TotalL1RefillRegs ++ TotalL1WritebackRegs ++ TotalL2RefillRegs ++ TotalL2WritebackRegs
+
+
+    val regmap = ctlnode.map{ c =>
+      c.regmap(mmreg: _*)
+    }
+
     // Create the L2 Banks
     val mods = (node.in zip node.out).zipWithIndex map { case (((in, edgeIn), (out, edgeOut)), i) =>
       edgeOut.manager.managers.foreach { m =>
@@ -177,27 +212,42 @@ class InclusiveCache(
       in .b.bits.address := params.restoreAddress(scheduler.io.in .b.bits.address)
       out.c.bits.address := params.restoreAddress(scheduler.io.out.c.bits.address)
 
-      when (in.a.fire && in.a.bits.opcode.isOneOf(TLMessages.AcquireBlock, TLMessages.Get)) {
-        reads(i) := true.B
-      }
+      val aIsAcquire = in.a.bits.opcode === TLMessages.AcquireBlock
+      val aIsInstFetch = in.a.bits.opcode === TLMessages.Get && in.a.bits.address >= membase.U
+      val aIsRead = aIsAcquire || aIsInstFetch
+      val aIsWrite = (in.a.bits.opcode === TLMessages.PutFullData || in.a.bits.opcode === TLMessages.PutPartialData) && in.a.bits.address >= membase.U
+      val cIsWb = in.c.bits.opcode === TLMessages.ReleaseData || in.c.bits.opcode === TLMessages.ProbeAckData
+      val outaIsAcquire = scheduler.io.out.a.bits.opcode === TLMessages.AcquireBlock
+      val outaIsInstFetch = scheduler.io.out.a.bits.opcode === TLMessages.Get && scheduler.io.out.a.bits.address >= membase.U
 
-      when (in.a.fire && in.a.bits.opcode.isOneOf(TLMessages.PutFullData, TLMessages.PutPartialData) && edgeIn.first(in.a)) {
-        writes_put(i) := true.B
-      }
+      //val toDRAM = (isMiss || isWbToDRAM
+      val outCIsWb =  (out.c.bits.opcode === TLMessages.ReleaseData || out.c.bits.opcode === TLMessages.ProbeAckData)
+      val outAIsWrite = (out.a.bits.opcode === TLMessages.PutFullData || out.a.bits.opcode === TLMessages.PutPartialData)
+      val outAIsRead = (out.a.bits.opcode === TLMessages.Get || out.a.bits.opcode === TLMessages.AcquireBlock)
 
-      when (in.c.fire && edgeIn.first(in.c) && in.c.bits.opcode.isOneOf(TLMessages.ReleaseData, TLMessages.ProbeAckData)) {
-        writes_rel(i) := true.B
-      } 
+      val IsToDRAMRead = (out.a.fire && edgeOut.first(out.a) && outAIsRead) //|| (out.c.fire && edgeOut.first(out.c))
+      val IsToDRAMWrite = (out.a.fire && edgeOut.first(out.a) &&  outAIsWrite) || (out.c.fire && edgeOut.first(out.c) && outCIsWb)
+
+      val l1EvictWb = in.c.bits.opcode === TLMessages.ReleaseData
+      val l1ProbeWb = in.c.bits.opcode === TLMessages.ProbeAckData
+      val inCIsWb =    (l1EvictWb || l1ProbeWb) // writes to LLC
+      val inAIsWrite = (in.a.bits.opcode === TLMessages.PutFullData || in.a.bits.opcode === TLMessages.PutPartialData)
+      val inAIsRead =  (in.a.bits.opcode === TLMessages.Get || in.a.bits.opcode === TLMessages.AcquireBlock)
+
+      val l1Refill = in.d.fire && edgeIn.first(in.d) && (in.d.bits.opcode === TLMessages.GrantData)
+      val l1WriteBack = (in.c.fire && edgeIn.first(in.c) && (inCIsWb))
+
+
+      val l2Refill = out.a.fire && (out.a.bits.opcode === TLMessages.AcquireBlock) //out.d.fire && edgeOut.first(out.d) && (out.d.bits.opcode === TLMessages.GrantData)
+      val l2WriteBack = (out.c.fire && edgeOut.first(out.c)) && (out.c.bits.opcode === TLMessages.ReleaseData)
+
+
+      PerBankl1Refill(i) := PerBankl1Refill(i)  + l1Refill.asUInt
+      PerBankl2Refill(i) := PerBankl2Refill(i)  + l2Refill.asUInt
+      PerBankl1Writeback(i) := PerBankl1Writeback(i)  + l1WriteBack.asUInt
+      PerBankl2Writeback(i) := PerBankl2Writeback(i)  + l2WriteBack.asUInt
 
       scheduler
-    }
-
-    // These count the "obvious" transactions that move data
-    // Don't count AcquirePerm, don't count atomics, don't count Hint
-    Seq(("read", reads), ("put", writes_put), ("wb", writes_rel)).foreach { case (name, sigs) =>
-      sigs.zipWithIndex.foreach { case (sig, i) =>
-        midas.targetutils.PerfCounter(sig, s"llc_${name}_b$i", s"Bank $i LLC $name events")
-      }
     }
 
     ctrls.foreach { ctrl =>
